@@ -81,4 +81,4 @@ This policy may be updated as the app evolves. Material changes will be communic
 
 ## Contact
 
-For questions about this policy or to exercise any of the rights listed above, contact the developer at: [your email here]
+For questions about this policy or to exercise any of the rights listed above, contact the developer at: amazeballzz@hotmail.com
