@@ -3,7 +3,21 @@ builder = "nixpacks"
 
 [deploy]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
-healthcheckPath = "/health"
+healthcheckPath = "/healthz"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+
+# ---------------------------------------------------------------------------
+# Morning cron — set up as a second Railway service
+# ---------------------------------------------------------------------------
+#
+# In the Railway dashboard:
+#   1. New service → Cron Job
+#   2. Connect same repo, root directory: backend
+#   3. Schedule: 0 12 * * *  (noon UTC ≈ 7am ET)
+#   4. Command: python jobs/morning.py
+#   5. Add env vars: BACKEND_URL (internal URL), API_KEY (same as main service)
+#
+# Alternatively, link the cron service to the main service so Railway
+# injects BACKEND_URL automatically via the private network.

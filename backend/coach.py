@@ -11,13 +11,15 @@ identical to coach.py. Changes here are the canonical version going forward.
 
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from statistics import mean
 from typing import Optional
 
 import anthropic
 
-from models import RecoverySignal, User, WeightPoint
+import db
+from lib.outlook import compute_outlook
+from models import CoachingResponse, RecoverySignal, SubjectiveLog, User, WeightPoint
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +44,8 @@ def build_digest(
     health: Optional[dict],
     recent_workouts: list[dict],
     weight_trend: list[WeightPoint],
+    outlook=None,
+    yesterday_subjective: Optional[SubjectiveLog] = None,
 ) -> dict:
     """
     Assemble the compact data snapshot Claude reasons over.
@@ -90,6 +94,10 @@ def build_digest(
             "dietary_modality": user.dietary_modality,
             "goal": user.goal,
         },
+        "outlook": {
+            "value": outlook.value if outlook else None,
+            "tier": outlook.tier if outlook else None,
+        } if outlook else None,
         "today": {
             "date": date.today().isoformat(),
             "recovery_score": recovery.recovery_score if recovery else None,
@@ -107,6 +115,14 @@ def build_digest(
         },
         "recent_workouts": workouts_summary,
         "data_gaps": data_gaps if data_gaps else None,
+        "yesterday_subjective": {
+            "mood": yesterday_subjective.mood_label,
+            "mood_numeric": yesterday_subjective.mood_numeric,
+            "energy": yesterday_subjective.energy,
+            "motivation": yesterday_subjective.motivation,
+            "clarity": yesterday_subjective.clarity,
+            "note": yesterday_subjective.note,
+        } if yesterday_subjective else None,
     }
 
 
@@ -285,3 +301,61 @@ async def generate_coaching(digest: dict, modality: str, goal: str) -> dict:
     )
 
     return parsed
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline (shared by main.py routes and jobs/morning.py)
+# ---------------------------------------------------------------------------
+
+async def run_pipeline(user_id: str, user: User) -> CoachingResponse:
+    """
+    Whoop pull → DB load → digest → Claude → store → return.
+    Shared by the HTTP generate endpoint and the morning cron job.
+    """
+    import whoop  # local import avoids circular at module level
+
+    # Step 1 — Whoop (best-effort)
+    try:
+        tokens = await db.get_whoop_tokens(user_id)
+        if tokens:
+            tokens = await whoop.refresh_if_needed(tokens)
+            await db.save_whoop_tokens(user_id, tokens)
+            whoop_snapshot = await whoop.fetch_recent(tokens["access_token"])
+            await db.upsert_recovery_signal(user_id, whoop_snapshot)
+    except Exception as exc:
+        log.warning("Whoop pull failed for user=%s: %s", user_id, exc)
+
+    # Step 2 — Load from DB
+    recovery = await db.get_latest_recovery_signal(user_id)
+    health = await db.get_latest_health_metrics(user_id)
+    recent_workouts = await db.get_recent_workouts(user_id, days=7)
+    weight_trend = await db.get_weight_trend(user_id, days=30)
+    recovery_history = await db.get_recovery_signals(user_id, days=30)
+    yesterday_subjective = await db.get_subjective_log(user_id, date.today() - timedelta(days=1))
+
+    # Step 2b — Outlook
+    outlook = compute_outlook(sorted(recovery_history, key=lambda s: s.date))
+
+    # Step 3 — Digest
+    digest = build_digest(
+        user=user,
+        recovery=recovery,
+        health=health,
+        recent_workouts=recent_workouts,
+        weight_trend=weight_trend,
+        outlook=outlook,
+        yesterday_subjective=yesterday_subjective,
+    )
+
+    # Step 4 — Claude
+    result = await generate_coaching(
+        digest=digest,
+        modality=user.dietary_modality,
+        goal=user.goal,
+    )
+
+    # Step 5 — Store
+    await db.save_coaching_output(user_id, digest, result)
+    log.info("Coaching stored for user=%s", user_id)
+
+    return CoachingResponse(**result)

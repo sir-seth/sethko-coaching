@@ -23,9 +23,8 @@ from pathlib import Path
 import asyncpg
 
 # Map Whoop user IDs (from tokens.json) to our app user IDs.
-# Update this if you have different Whoop user IDs.
 WHOOP_TO_APP_USER = {
-     "37338043": "seth",   # ← fill in from tokens.json
+    "37338043": "seth",
 }
 
 USERS = [
@@ -35,6 +34,7 @@ USERS = [
         "email": None,
         "dietary_modality": "maintenance_active",
         "goal": "cut",
+        "mode": "gentle",
         "recovery_source": "whoop",
     },
 ]
@@ -47,28 +47,26 @@ async def seed(tokens_file):
 
     conn = await asyncpg.connect(dsn)
 
-    # Ensure tables exist (same DDL as db.py).
     print("Creating tables if needed...")
     from db import _CREATE_TABLES_SQL
     await conn.execute(_CREATE_TABLES_SQL)
 
-    # Insert users.
     for u in USERS:
         await conn.execute(
             """
-            INSERT INTO users (id, name, email, dietary_modality, goal, recovery_source)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO users (id, name, email, dietary_modality, goal, mode, recovery_source)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (id) DO UPDATE SET
                 dietary_modality = EXCLUDED.dietary_modality,
                 goal             = EXCLUDED.goal,
+                mode             = EXCLUDED.mode,
                 recovery_source  = EXCLUDED.recovery_source
             """,
             u["id"], u["name"], u["email"],
-            u["dietary_modality"], u["goal"], u["recovery_source"],
+            u["dietary_modality"], u["goal"], u["mode"], u["recovery_source"],
         )
-        print(f"  Upserted user: {u['id']}")
+        print(f"  Upserted user: {u['id']} (mode={u['mode']})")
 
-    # Migrate tokens if a file was given.
     if tokens_file and tokens_file.exists():
         tokens = json.loads(tokens_file.read_text())
         print(f"\nMigrating tokens from {tokens_file} ({len(tokens)} entries)...")
@@ -79,7 +77,6 @@ async def seed(tokens_file):
                 print(f"  SKIP: no mapping for Whoop user {whoop_user_id}. Add to WHOOP_TO_APP_USER.")
                 continue
 
-            # Estimate expires_at from obtained_at + expires_in.
             obtained_at = token_data.get("obtained_at")
             expires_in = token_data.get("expires_in", 3600)
             if obtained_at:
@@ -87,6 +84,7 @@ async def seed(tokens_file):
                 expires_at = obtained_dt + timedelta(seconds=expires_in)
             else:
                 expires_at = None
+
             await conn.execute(
                 """
                 INSERT INTO whoop_tokens
@@ -111,7 +109,6 @@ async def seed(tokens_file):
             print(f"\nTokens file not found at {tokens_file} — skipping token migration.")
         else:
             print("\nNo --tokens-file given — skipping token migration.")
-            print("Run again with --tokens-file ~/code/sethko-coaching/tokens.json to migrate tokens.")
 
     await conn.close()
     print("\nDone.")

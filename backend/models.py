@@ -10,6 +10,14 @@ from datetime import date, datetime
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
+# Stable mood → numeric mapping. Pinned here so T-30 pattern engine imports it.
+MOOD_NUMERIC: dict[str, int] = {
+    "rough": 2,
+    "flat": 4,
+    "good": 7,
+    "great": 9,
+}
+
 
 # ---------------------------------------------------------------------------
 # User
@@ -28,6 +36,8 @@ Goal = Literal["cut", "recomp", "bulk", "maintain", "performance"]
 
 RecoverySource = Literal["whoop", "oura", "both"]
 
+CoachingMode = Literal["gentle", "optimizer"]
+
 
 class User(BaseModel):
     id: str
@@ -35,6 +45,7 @@ class User(BaseModel):
     email: Optional[str] = None
     dietary_modality: DietaryModality
     goal: Goal
+    mode: CoachingMode = "gentle"
     recovery_source: RecoverySource = "whoop"
     # Optional manual macro overrides. None means Claude sets targets dynamically.
     macro_targets: Optional[dict[str, Any]] = None
@@ -49,12 +60,13 @@ class WorkoutEntry(BaseModel):
     """One workout session from HealthKit."""
     started_at: datetime
     ended_at: datetime
-    activity_type: str          # e.g. "HKWorkoutActivityTypeTraditionalStrengthTraining"
+    activity_type: str          # modality enum: strength/cardio/mobility/recreational/other
     activity_label: str         # human-readable, e.g. "Strength Training"
+    modality: Optional[str] = None   # same as activity_type; explicit field for clarity
     duration_min: float
     avg_hr_bpm: Optional[float] = None
     calories: Optional[float] = None
-    source_app: Optional[str] = None  # e.g. "com.fitnessapp.macrofactor"
+    source_app: Optional[str] = None
 
 
 class HealthSnapshot(BaseModel):
@@ -130,3 +142,30 @@ class CoachingResponse(BaseModel):
     workout_suggestion: WorkoutSuggestion
     daily_brief: str
     generated_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Subjective check-in (T-17)
+# ---------------------------------------------------------------------------
+
+MoodLabel = Literal["rough", "flat", "good", "great"]
+
+
+class CheckInRequest(BaseModel):
+    date: date
+    mood: MoodLabel
+    energy: int   # 1-10
+    motivation: int   # 1-10
+    clarity: int   # 1-10
+    note: Optional[str] = None
+
+
+class SubjectiveLog(BaseModel):
+    date: date
+    mood_label: str
+    mood_numeric: int
+    energy: int
+    motivation: int
+    clarity: int
+    note: Optional[str] = None
+    created_at: Optional[datetime] = None

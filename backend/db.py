@@ -19,9 +19,12 @@ from typing import Optional
 import asyncpg
 
 from models import (
+    CheckInRequest,
     CoachingResponse,
     HealthSnapshot,
+    MOOD_NUMERIC,
     RecoverySignal,
+    SubjectiveLog,
     User,
     WeightPoint,
     WorkoutEntry,
@@ -66,10 +69,14 @@ CREATE TABLE IF NOT EXISTS users (
     email             TEXT,
     dietary_modality  TEXT NOT NULL DEFAULT 'flexible',
     goal              TEXT NOT NULL DEFAULT 'maintain',
+    mode              TEXT NOT NULL DEFAULT 'gentle',
     recovery_source   TEXT NOT NULL DEFAULT 'whoop',
     macro_targets     JSONB,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Add mode column if upgrading from a schema that predates it.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'gentle';
 
 CREATE TABLE IF NOT EXISTS whoop_tokens (
     user_id        TEXT PRIMARY KEY REFERENCES users(id),
@@ -139,6 +146,39 @@ CREATE TABLE IF NOT EXISTS coaching_outputs (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, date)
 );
+
+-- Subjective check-in (mood + sliders + note). T-16/T-17.
+CREATE TABLE IF NOT EXISTS subjective_log (
+    id           SERIAL PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    date         DATE NOT NULL,
+    mood_label   TEXT,          -- "rough"|"flat"|"good"|"great"
+    mood_numeric SMALLINT,      -- rough=2, flat=4, good=7, great=9 (pattern engine, T-30)
+    energy       SMALLINT,      -- 1-10
+    motivation   SMALLINT,      -- 1-10
+    clarity      SMALLINT,      -- 1-10
+    note         TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, date)
+);
+-- Migrate existing installs from the Phase 1 schema (mood INTEGER 1-5).
+ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS mood_label TEXT;
+ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS mood_numeric SMALLINT;
+ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS motivation SMALLINT;
+ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS clarity SMALLINT;
+
+-- Food log entries. Populated in Phase 2 (T-21).
+CREATE TABLE IF NOT EXISTS nutrition_log (
+    id           SERIAL PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    logged_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    description  TEXT NOT NULL,
+    kcal         INTEGER,
+    protein_g    REAL,
+    carbs_g      REAL,
+    fat_g        REAL,
+    source       TEXT           -- 'manual', 'voice', 'barcode'
+);
 """
 
 
@@ -163,6 +203,7 @@ async def get_user(user_id: str) -> Optional[User]:
         email=row["email"],
         dietary_modality=row["dietary_modality"],
         goal=row["goal"],
+        mode=row["mode"],
         recovery_source=row["recovery_source"],
         macro_targets=row["macro_targets"],
         created_at=row["created_at"],
@@ -173,21 +214,23 @@ async def upsert_user(user: User):
     async with _conn() as conn:
         await conn.execute(
             """
-            INSERT INTO users (id, name, email, dietary_modality, goal, recovery_source, macro_targets)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO users (id, name, email, dietary_modality, goal, mode, recovery_source, macro_targets)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                email = EXCLUDED.email,
+                name             = EXCLUDED.name,
+                email            = EXCLUDED.email,
                 dietary_modality = EXCLUDED.dietary_modality,
-                goal = EXCLUDED.goal,
-                recovery_source = EXCLUDED.recovery_source,
-                macro_targets = EXCLUDED.macro_targets
+                goal             = EXCLUDED.goal,
+                mode             = EXCLUDED.mode,
+                recovery_source  = EXCLUDED.recovery_source,
+                macro_targets    = EXCLUDED.macro_targets
             """,
             user.id,
             user.name,
             user.email,
             user.dietary_modality,
             user.goal,
+            user.mode,
             user.recovery_source,
             json.dumps(user.macro_targets) if user.macro_targets else None,
         )
@@ -320,11 +363,12 @@ async def upsert_health_metrics(user_id: str, snapshot: HealthSnapshot):
             await conn.execute(
                 """
                 INSERT INTO workout_log
-                    (user_id, started_at, ended_at, sport_name, duration_min,
+                    (user_id, started_at, ended_at, modality, sport_name, duration_min,
                      avg_hr_bpm, calories, source, raw)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (user_id, started_at) DO UPDATE SET
                     ended_at     = EXCLUDED.ended_at,
+                    modality     = EXCLUDED.modality,
                     duration_min = EXCLUDED.duration_min,
                     avg_hr_bpm   = EXCLUDED.avg_hr_bpm,
                     calories     = EXCLUDED.calories
@@ -332,11 +376,12 @@ async def upsert_health_metrics(user_id: str, snapshot: HealthSnapshot):
                 user_id,
                 w.started_at,
                 w.ended_at,
+                w.modality or w.activity_type,
                 w.activity_label,
                 w.duration_min,
                 w.avg_hr_bpm,
                 w.calories,
-                "healthkit",
+                w.source_app or "healthkit",
                 json.dumps({"activity_type": w.activity_type, "source_app": w.source_app}),
             )
 
@@ -431,30 +476,75 @@ async def save_coaching_output(user_id: str, digest: dict, response: dict):
 
 
 # ---------------------------------------------------------------------------
+# Subjective check-in (T-17)
+# ---------------------------------------------------------------------------
+
+async def upsert_subjective_log(user_id: str, payload: CheckInRequest):
+    mood_numeric = MOOD_NUMERIC[payload.mood]
+    async with _conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO subjective_log
+                (user_id, date, mood_label, mood_numeric, energy, motivation, clarity, note)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (user_id, date) DO UPDATE SET
+                mood_label   = EXCLUDED.mood_label,
+                mood_numeric = EXCLUDED.mood_numeric,
+                energy       = EXCLUDED.energy,
+                motivation   = EXCLUDED.motivation,
+                clarity      = EXCLUDED.clarity,
+                note         = EXCLUDED.note,
+                created_at   = NOW()
+            """,
+            user_id,
+            payload.date,
+            payload.mood,
+            mood_numeric,
+            payload.energy,
+            payload.motivation,
+            payload.clarity,
+            payload.note,
+        )
+
+
+async def get_subjective_log(user_id: str, for_date: date) -> Optional[SubjectiveLog]:
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT date, mood_label, mood_numeric, energy, motivation, clarity, note, created_at
+            FROM subjective_log
+            WHERE user_id = $1 AND date = $2
+            """,
+            user_id,
+            for_date,
+        )
+    if not row:
+        return None
+    return SubjectiveLog(
+        date=row["date"],
+        mood_label=row["mood_label"],
+        mood_numeric=row["mood_numeric"],
+        energy=row["energy"],
+        motivation=row["motivation"],
+        clarity=row["clarity"],
+        note=row["note"],
+        created_at=row["created_at"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Seed helpers (called from seed_users.py, not from the app)
 # ---------------------------------------------------------------------------
 
 async def seed_default_users():
-    """
-    Insert Seth and Slav if they don't exist yet.
-    Run once after first deploy: python seed_users.py
-    """
+    """Insert Seth if he doesn't exist. Run once after first deploy."""
     seth = User(
         id="seth",
         name="Seth",
-        email=None,
         dietary_modality="maintenance_active",
         goal="cut",
+        mode="gentle",
         recovery_source="whoop",
     )
-    slav = User(
-        id="slav",
-        name="Slav",
-        email=None,
-        dietary_modality="high_protein_performance",
-        goal="bulk",
-        recovery_source="whoop",
-    )
-    for u in [seth, slav]:
-        await upsert_user(u)
-        log.info("Seeded user: %s", u.id)
+    await upsert_user(seth)
+    log.info("Seeded user: %s", seth.id)
