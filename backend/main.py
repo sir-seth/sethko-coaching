@@ -56,10 +56,12 @@ app = FastAPI(title="Sethko Coaching API", lifespan=lifespan)
 from routes.health import router as health_router
 from routes.brief import router as brief_router
 from routes.checkin import router as checkin_router
+from routes.wins import router as wins_router
 
 app.include_router(health_router)
 app.include_router(brief_router)
 app.include_router(checkin_router)
+app.include_router(wins_router)
 
 
 # ---------------------------------------------------------------------------
