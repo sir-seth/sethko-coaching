@@ -169,3 +169,45 @@ class SubjectiveLog(BaseModel):
     clarity: int
     note: Optional[str] = None
     created_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Win log (T-18)
+# ---------------------------------------------------------------------------
+
+class WinRequest(BaseModel):
+    date: date
+    text: str
+    meta: Optional[str] = None
+    category: str = "other"
+
+
+class WinEntry(BaseModel):
+    id: int
+    date: date
+    text: str
+    meta: Optional[str] = None
+    category: str
+    created_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Log index (T-20)
+# ---------------------------------------------------------------------------
+
+class PendingWorkout(BaseModel):
+    id: int
+    source: str                      # "whoop" | "apple_health"
+    detail: str                      # "Strength · 47 min"
+    started_at: datetime
+    duration_min: Optional[float] = None
+    strain_score: Optional[float] = None
+
+
+class LogEntry(BaseModel):
+    id: str
+    kind: str                        # "food" | "workout" | "checkin"
+    icon: str                        # SF symbol name
+    text: str
+    meta: str
+    logged_at: datetime

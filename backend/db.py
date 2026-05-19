@@ -22,11 +22,15 @@ from models import (
     CheckInRequest,
     CoachingResponse,
     HealthSnapshot,
+    LogEntry,
     MOOD_NUMERIC,
+    PendingWorkout,
     RecoverySignal,
     SubjectiveLog,
     User,
     WeightPoint,
+    WinEntry,
+    WinRequest,
     WorkoutEntry,
 )
 
@@ -132,9 +136,12 @@ CREATE TABLE IF NOT EXISTS workout_log (
     strain_score   REAL,
     notes          TEXT,
     raw            JSONB,
+    confirmed      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, started_at)
 );
+-- Migrate existing installs: add confirmed column if missing.
+ALTER TABLE workout_log ADD COLUMN IF NOT EXISTS confirmed BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Claude's output, one row per user per day.
 CREATE TABLE IF NOT EXISTS coaching_outputs (
@@ -179,6 +186,18 @@ CREATE TABLE IF NOT EXISTS nutrition_log (
     fat_g        REAL,
     source       TEXT           -- 'manual', 'voice', 'barcode'
 );
+
+-- Win log (T-18). One row per win; multiple wins allowed per day.
+CREATE TABLE IF NOT EXISTS win_log (
+    id          SERIAL PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    date        DATE NOT NULL,
+    text        TEXT NOT NULL,
+    meta        TEXT,
+    category    TEXT NOT NULL DEFAULT 'other',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS win_log_user_date ON win_log (user_id, date);
 """
 
 
@@ -530,6 +549,187 @@ async def get_subjective_log(user_id: str, for_date: date) -> Optional[Subjectiv
         note=row["note"],
         created_at=row["created_at"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Log index (T-20)
+# ---------------------------------------------------------------------------
+
+async def get_pending_workouts(user_id: str, days: int = 3) -> list[PendingWorkout]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, source, sport_name, modality, started_at, duration_min, strain_score
+            FROM workout_log
+            WHERE user_id = $1 AND confirmed = false AND started_at >= $2
+            ORDER BY started_at DESC
+            """,
+            user_id, cutoff,
+        )
+    result = []
+    for r in rows:
+        name = r["sport_name"] or r["modality"] or "Workout"
+        dur = f"{int(r['duration_min'])} min" if r["duration_min"] else ""
+        detail = f"{name} · {dur}" if dur else name
+        result.append(PendingWorkout(
+            id=r["id"],
+            source=r["source"] or "device",
+            detail=detail,
+            started_at=r["started_at"],
+            duration_min=r["duration_min"],
+            strain_score=r["strain_score"],
+        ))
+    return result
+
+
+async def confirm_workout(user_id: str, workout_id: int) -> bool:
+    async with _conn() as conn:
+        result = await conn.execute(
+            "UPDATE workout_log SET confirmed = true WHERE id = $1 AND user_id = $2",
+            workout_id, user_id,
+        )
+    return result == "UPDATE 1"
+
+
+async def get_today_entries(user_id: str, for_date: date) -> list[LogEntry]:
+    start = datetime(for_date.year, for_date.month, for_date.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    entries: list[LogEntry] = []
+
+    async with _conn() as conn:
+        # Nutrition
+        nutrition = await conn.fetch(
+            """
+            SELECT id::text, description, kcal, protein_g, logged_at
+            FROM nutrition_log
+            WHERE user_id = $1 AND logged_at >= $2 AND logged_at < $3
+            ORDER BY logged_at ASC
+            """,
+            user_id, start, end,
+        )
+        for r in nutrition:
+            parts = [p for p in [
+                f"{r['kcal']} kcal" if r["kcal"] else None,
+                f"{int(r['protein_g'])}g pr" if r["protein_g"] else None,
+            ] if p]
+            entries.append(LogEntry(
+                id=f"food-{r['id']}",
+                kind="food",
+                icon="fork.knife",
+                text=r["description"],
+                meta=" · ".join(parts) if parts else "",
+                logged_at=r["logged_at"],
+            ))
+
+        # Confirmed workouts
+        workouts = await conn.fetch(
+            """
+            SELECT id::text, sport_name, modality, duration_min, started_at
+            FROM workout_log
+            WHERE user_id = $1 AND confirmed = true
+              AND started_at >= $2 AND started_at < $3
+            ORDER BY started_at ASC
+            """,
+            user_id, start, end,
+        )
+        for r in workouts:
+            name = r["sport_name"] or r["modality"] or "Workout"
+            dur = f"{int(r['duration_min'])} min" if r["duration_min"] else ""
+            icon = _workout_icon(r["modality"] or "")
+            entries.append(LogEntry(
+                id=f"workout-{r['id']}",
+                kind="workout",
+                icon=icon,
+                text=name,
+                meta=dur,
+                logged_at=r["started_at"],
+            ))
+
+        # Check-in
+        checkin = await conn.fetchrow(
+            """
+            SELECT id::text, mood_label, created_at
+            FROM subjective_log
+            WHERE user_id = $1 AND date = $2
+            """,
+            user_id, for_date,
+        )
+        if checkin:
+            entries.append(LogEntry(
+                id=f"checkin-{checkin['id']}",
+                kind="checkin",
+                icon="checkmark.seal",
+                text="Morning check-in",
+                meta=checkin["mood_label"] or "",
+                logged_at=checkin["created_at"],
+            ))
+
+    entries.sort(key=lambda e: e.logged_at)
+    return entries
+
+
+def _workout_icon(modality: str) -> str:
+    m = modality.lower()
+    if "strength" in m or "lift" in m: return "dumbbell"
+    if "run" in m or "cardio" in m:    return "figure.run"
+    if "walk" in m:                    return "figure.walk"
+    if "yoga" in m or "mobility" in m: return "figure.yoga"
+    if "meditat" in m:                 return "figure.mind.and.body"
+    return "figure.mixed.cardio"
+
+
+# ---------------------------------------------------------------------------
+# Win log (T-18)
+# ---------------------------------------------------------------------------
+
+async def insert_win(user_id: str, payload: WinRequest) -> WinEntry:
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO win_log (user_id, date, text, meta, category)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, date, text, meta, category, created_at
+            """,
+            user_id,
+            payload.date,
+            payload.text,
+            payload.meta,
+            payload.category,
+        )
+    return WinEntry(
+        id=row["id"],
+        date=row["date"],
+        text=row["text"],
+        meta=row["meta"],
+        category=row["category"],
+        created_at=row["created_at"],
+    )
+
+
+async def get_wins(user_id: str, for_date: date) -> list[WinEntry]:
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, date, text, meta, category, created_at
+            FROM win_log
+            WHERE user_id = $1 AND date = $2
+            ORDER BY created_at ASC
+            """,
+            user_id,
+            for_date,
+        )
+    return [
+        WinEntry(
+            id=r["id"],
+            date=r["date"],
+            text=r["text"],
+            meta=r["meta"],
+            category=r["category"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
