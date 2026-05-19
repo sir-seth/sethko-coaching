@@ -407,7 +407,7 @@ async def get_coaching_output(user_id: str, for_date: date) -> Optional[Coaching
         )
     if not row:
         return None
-    data = row["response"]
+    data = json.loads(row["response"]) if isinstance(row["response"], str) else row["response"]
     data["generated_at"] = row["created_at"]
     return CoachingResponse(**data)
 
