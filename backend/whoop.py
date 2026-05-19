@@ -69,6 +69,7 @@ async def refresh_if_needed(tokens: dict) -> dict:
         "refresh_token": tokens["refresh_token"],
         "client_id": client_id,
         "client_secret": client_secret,
+        "redirect_uri": "http://localhost:8000/whoop/callback",
     }).encode("utf-8")
 
     req = urllib.request.Request(
