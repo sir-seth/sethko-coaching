@@ -39,8 +39,6 @@ _pool: None
 async def init():
     global _pool
     dsn = os.environ.get("DATABASE_URL")
-    log.info("ENV VARS: %s", list(os.environ.keys()))
-    log.info("DATABASE_URL present: %s", dsn is not None)
     if not dsn:
         raise RuntimeError("DATABASE_URL env var is not set.")
     _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
