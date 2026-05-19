@@ -29,7 +29,7 @@ from models import (
 
 log = logging.getLogger(__name__)
 
-_pool: asyncpg.Pool | None = None
+_pool: None
 
 
 # ---------------------------------------------------------------------------

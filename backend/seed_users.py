@@ -25,8 +25,7 @@ import asyncpg
 # Map Whoop user IDs (from tokens.json) to our app user IDs.
 # Update this if you have different Whoop user IDs.
 WHOOP_TO_APP_USER = {
-    # "12345678": "seth",   # ← fill in from tokens.json
-    # "87654321": "slav",
+     "37338043": "seth",   # ← fill in from tokens.json
 }
 
 USERS = [
@@ -38,18 +37,10 @@ USERS = [
         "goal": "cut",
         "recovery_source": "whoop",
     },
-    {
-        "id": "slav",
-        "name": "Slav",
-        "email": None,
-        "dietary_modality": "high_protein_performance",
-        "goal": "bulk",
-        "recovery_source": "whoop",
-    },
 ]
 
 
-async def seed(tokens_file: Path | None):
+async def seed(tokens_file):
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise SystemExit("Set DATABASE_URL before running this script.")
@@ -93,10 +84,9 @@ async def seed(tokens_file: Path | None):
             expires_in = token_data.get("expires_in", 3600)
             if obtained_at:
                 obtained_dt = datetime.fromisoformat(obtained_at.replace("Z", "+00:00"))
-                expires_at = (obtained_dt + timedelta(seconds=expires_in)).isoformat()
+                expires_at = obtained_dt + timedelta(seconds=expires_in)
             else:
                 expires_at = None
-
             await conn.execute(
                 """
                 INSERT INTO whoop_tokens
