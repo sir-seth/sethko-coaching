@@ -1,11 +1,11 @@
 """
 Food log routes (T-21).
 
-POST /api/food/{user_id}/parse-voice   transcript → [ParsedFoodItem]
-POST /api/food/{user_id}/log           log one food entry
-GET  /api/food/{user_id}/entries       entries for a date
-GET  /api/food/{user_id}/macros        day totals
-GET  /api/food/{user_id}/week-status   7-day strip statuses
+POST /api/food/parse-voice   transcript → [ParsedFoodItem]
+POST /api/food/log           log one food entry
+GET  /api/food/entries       entries for a date
+GET  /api/food/macros        day totals
+GET  /api/food/week-status   7-day strip statuses
 """
 
 import json
@@ -17,7 +17,7 @@ import anthropic
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 import db
-from auth import require_api_key
+from auth import get_current_user_id
 from lib.food_db import search_usda, scale_macros
 from models import (
     DayMacros,
@@ -77,19 +77,14 @@ async def _resolve_macros(description: str, weight_g: float) -> dict:
 
 
 @router.post(
-    "/{user_id}/parse-voice",
+    "/parse-voice",
     response_model=list[ParsedFoodItem],
-    dependencies=[Depends(require_api_key)],
 )
-async def parse_voice(user_id: str, body: dict):
+async def parse_voice(body: dict, user_id: str = Depends(get_current_user_id)):
     """
     Body: { "transcript": "two eggs and oats and a black coffee" }
     Returns a list of ParsedFoodItem with USDA-verified macros where available.
     """
-    user = await db.get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
-
     transcript = body.get("transcript", "").strip()
     if not transcript:
         raise HTTPException(status_code=422, detail="transcript is required.")
@@ -137,57 +132,49 @@ async def parse_voice(user_id: str, body: dict):
 
 
 @router.post(
-    "/{user_id}/log",
+    "/log",
     response_model=FoodEntry,
-    dependencies=[Depends(require_api_key)],
 )
-async def log_food(user_id: str, payload: FoodEntryRequest):
-    user = await db.get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
+async def log_food(payload: FoodEntryRequest, user_id: str = Depends(get_current_user_id)):
     entry = await db.insert_food_entry(user_id, payload)
     log.info("Logged food for user=%s: %s (%s kcal)", user_id, entry.description, entry.kcal)
     return entry
 
 
 @router.get(
-    "/{user_id}/entries",
+    "/entries",
     response_model=list[FoodEntry],
-    dependencies=[Depends(require_api_key)],
 )
-async def get_entries(user_id: str, date: date = Query(default=None)):
-    user = await db.get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
+async def get_entries(
+    date: date = Query(default=None),
+    user_id: str = Depends(get_current_user_id),
+):
     target = date or __import__("datetime").date.today()
     return await db.get_food_entries(user_id, target)
 
 
 @router.get(
-    "/{user_id}/macros",
+    "/macros",
     response_model=DayMacros,
-    dependencies=[Depends(require_api_key)],
 )
-async def get_macros(user_id: str, date: date = Query(default=None)):
-    user = await db.get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
+async def get_macros(
+    date: date = Query(default=None),
+    user_id: str = Depends(get_current_user_id),
+):
     target = date or __import__("datetime").date.today()
     return await db.get_day_macros(user_id, target)
 
 
 @router.get(
-    "/{user_id}/week-status",
+    "/week-status",
     response_model=list[WeekDayStatus],
-    dependencies=[Depends(require_api_key)],
 )
-async def get_week_status(user_id: str, anchor: date = Query(default=None)):
+async def get_week_status(
+    anchor: date = Query(default=None),
+    user_id: str = Depends(get_current_user_id),
+):
     """Returns statuses for the 7-day week containing `anchor` (defaults to today)."""
-    user = await db.get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
     anchor_date = anchor or __import__("datetime").date.today()
-    # Monday-anchored week
     monday = anchor_date - timedelta(days=anchor_date.weekday())
     week = [monday + timedelta(days=i) for i in range(7)]
     return await db.get_week_food_status(user_id, week)

@@ -31,9 +31,18 @@ MODEL = "claude-sonnet-4-6"
 
 _PROMPT_PATH = Path(__file__).parent.parent / "lib" / "prompts" / "coaching.md"
 
+_STAMP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "what":  {"type": "string"},
+        "means": {"type": "string"},
+    },
+    "required": ["what", "means"],
+}
+
 TOOL_DEF = {
     "name": "generate_coaching_card",
-    "description": "Output the coaching card for today's Daily Brief.",
+    "description": "Output the coaching card and metric stamps for today's Daily Brief.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -46,9 +55,19 @@ TOOL_DEF = {
                     "action_label": {"type": "string"},
                 },
                 "required": ["eyebrow", "headline", "body", "action_label"],
-            }
+            },
+            "metric_stamps": {
+                "type": "object",
+                "properties": {
+                    "hrv":    _STAMP_SCHEMA,
+                    "sleep":  _STAMP_SCHEMA,
+                    "rhr":    _STAMP_SCHEMA,
+                    "strain": _STAMP_SCHEMA,
+                },
+                "required": ["hrv", "sleep", "rhr", "strain"],
+            },
         },
-        "required": ["coaching_card"],
+        "required": ["coaching_card", "metric_stamps"],
     },
 }
 
@@ -87,6 +106,7 @@ def _build_snapshot(
     signals_30d: list[RecoverySignal],
     outlook,
     recent_vice: bool,
+    recent_patterns: list[str] | None = None,
 ) -> dict:
     yesterday_obj = None
     if today_signal:
@@ -111,7 +131,7 @@ def _build_snapshot(
         "today_outlook":        outlook.value if outlook else None,
         "today_outlook_tier":   outlook.tier  if outlook else None,
         "planned_activity":     None,    # T-27 will populate
-        "recent_patterns":      [],      # T-30 will populate
+        "recent_patterns":      recent_patterns or [],
         "user_mode":            user.mode,
         "prior_3_day_completion": {},    # T-20/T-29 will populate
         "recent_vice":          recent_vice,
@@ -129,7 +149,7 @@ async def _call_claude(snapshot: dict, user: User) -> dict:
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=MODEL,
-        max_tokens=600,
+        max_tokens=900,
         temperature=0.4,
         system=system_prompt,
         tools=[TOOL_DEF],
@@ -141,9 +161,91 @@ async def _call_claude(snapshot: dict, user: User) -> dict:
     if not tool_use:
         raise ValueError("Claude returned no tool_use block")
 
-    result = tool_use.input
-    result["metric_stamps"] = None
-    return result
+    return tool_use.input
+
+
+def _pick_plan(user: User, outlook) -> dict:
+    """
+    Deterministic plan selection — called once at morning brief time.
+    Result is stored in brief_today.payload.plan_pick and served by /api/plan/today.
+    """
+    if outlook is None:
+        return {
+            "category": "walk",
+            "headline": "A walk usually helps.",
+            "body": "We'll have a more specific suggestion once we've learned your patterns.",
+            "meta": [],
+            "outlook_value": None,
+            "is_new_activity": False,
+            "is_learning": True,
+        }
+
+    tier = outlook.tier
+    value = outlook.value
+    mode = user.mode
+
+    if mode == "optimizer":
+        if tier in ("bright", "steady"):
+            return {
+                "category": "lift",
+                "headline": "Lift heavy. The body is asking.",
+                "body": "Back/chest/arms · 45 min · 4 exercises. HRV strong — let's use it.",
+                "meta": ["45 MIN", "RPE 7–8", "~2,300 KCAL"],
+                "outlook_value": value,
+                "is_new_activity": False,
+                "is_learning": False,
+            }
+        elif tier == "low":
+            return {
+                "category": "run",
+                "headline": "Move at a comfortable pace.",
+                "body": "30 min easy zone 2 run. Keeps the momentum without asking too much.",
+                "meta": ["30 MIN", "ZONE 2", "~400 KCAL"],
+                "outlook_value": value,
+                "is_new_activity": False,
+                "is_learning": False,
+            }
+        else:  # rough
+            return {
+                "category": "walk",
+                "headline": "Walk it out.",
+                "body": "20–30 min easy walk. Movement without demand — body gets to choose how much.",
+                "meta": ["20–30 MIN"],
+                "outlook_value": value,
+                "is_new_activity": False,
+                "is_learning": False,
+            }
+    else:  # gentle (default)
+        if tier in ("bright", "steady"):
+            return {
+                "category": "walk",
+                "headline": "A walk sounds good today.",
+                "body": "Park, neighborhood, or wherever — 20 min outdoors does a lot.",
+                "meta": ["20–30 MIN"],
+                "outlook_value": value,
+                "is_new_activity": False,
+                "is_learning": False,
+            }
+        elif tier == "low":
+            return {
+                "category": "walk",
+                "headline": "Even a short walk helps.",
+                "body": "5–10 minutes outside is enough. No need to push today.",
+                "meta": ["5–10 MIN"],
+                "outlook_value": value,
+                "is_new_activity": False,
+                "is_learning": False,
+            }
+        else:  # rough
+            return {
+                "category": "walk",
+                "headline": "Rest is movement too.",
+                "body": "If you want to move, a slow walk around the block is all it takes.",
+                "meta": [],
+                "outlook_value": value,
+                "is_new_activity": False,
+                "is_learning": False,
+            }
 
 
 async def compose_brief(user_id: str, for_date: date) -> dict:
@@ -200,14 +302,25 @@ async def compose_brief(user_id: str, for_date: date) -> dict:
     yesterday_subj   = await db.get_subjective_log(user_id, yesterday)
     recent_vice      = await db.had_recent_vice(user_id)
 
+    # Load yesterday's qualifying patterns (T-30). Best-effort; empty on failure.
+    recent_patterns: list[str] = []
+    try:
+        from jobs.patterns import get_recent_patterns_summary
+        recent_patterns = await get_recent_patterns_summary(user_id)
+    except Exception as exc:
+        log.debug("Could not load recent_patterns for user=%s: %s", user_id, exc)
+
     # Compute outlook (requires ≥14 scored days).
     outlook = compute_outlook(sorted(signals_30d, key=lambda s: s.date))
     if outlook is None:
-        payload = {"state": "still_learning"}
+        plan_pick = _pick_plan(user, None)
+        payload = {"state": "still_learning", "plan_pick": plan_pick}
         await db.save_brief_today(user_id, for_date, payload)
         return payload
 
-    snapshot = _build_snapshot(user, today_signal, yesterday_subj, signals_30d, outlook, recent_vice)
+    snapshot = _build_snapshot(user, today_signal, yesterday_subj, signals_30d, outlook, recent_vice, recent_patterns)
+    plan_pick = _pick_plan(user, outlook)
+    snapshot["planned_activity"] = plan_pick.get("category")
 
     try:
         payload = await _call_claude(snapshot, user)
@@ -215,6 +328,7 @@ async def compose_brief(user_id: str, for_date: date) -> dict:
         log.error("Claude call failed for user=%s: %s — using safe payload", user_id, exc)
         payload = SAFE_PAYLOAD.copy()
 
+    payload["plan_pick"] = plan_pick
     await db.save_brief_today(user_id, for_date, payload)
     log.info("Brief composed for user=%s outlook=%s", user_id, outlook.value)
     return payload

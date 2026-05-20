@@ -314,3 +314,79 @@ class ViceLogResponse(BaseModel):
 
 class ViceCategoryRequest(BaseModel):
     label: str
+
+
+# ---------------------------------------------------------------------------
+# Sign in with Apple (T-26)
+# ---------------------------------------------------------------------------
+
+class SIWARequest(BaseModel):
+    identity_token: str       # JWT from ASAuthorizationAppleIDCredential.identityToken
+    authorization_code: str   # from credential.authorizationCode
+    user_id_apple: str        # credential.user — stable Apple sub
+    raw_nonce: str            # the un-hashed nonce iOS generated before the auth request
+    email: Optional[str] = None      # only present on first authorization
+    full_name: Optional[str] = None  # only present on first authorization
+
+
+class SIWAResponse(BaseModel):
+    session_token: str
+    user_id: str
+    mode: Optional[CoachingMode] = None
+
+
+# ---------------------------------------------------------------------------
+# Plan index (T-27)
+# ---------------------------------------------------------------------------
+
+class PlanPick(BaseModel):
+    category: str                    # "lift"|"walk"|"meditate"|"run" etc.
+    headline: str
+    body: str
+    meta: list[str] = []             # ["45 MIN", "RPE 7–8", "~2,300 KCAL"]
+    outlook_value: Optional[int] = None
+    is_new_activity: bool = False    # True when pick isn't in user's habits (T-41)
+    is_learning: bool = False        # True when outlook baseline < 14 days
+
+
+class DocketItem(BaseModel):
+    id: int
+    category: str
+    name: str
+    meta: str
+    created_at: datetime
+
+
+class CommitPlanRequest(BaseModel):
+    category: str
+    name: str
+
+
+# ---------------------------------------------------------------------------
+# Workout logger (T-29)
+# ---------------------------------------------------------------------------
+
+class WorkoutSetPayload(BaseModel):
+    reps: int
+    weight_lb: Optional[float] = None
+    rpe: Optional[int] = None          # 1–10; null = not rated
+
+
+class WorkoutExercisePayload(BaseModel):
+    name: str
+    skipped: bool = False
+    sets: list[WorkoutSetPayload] = []
+
+
+class WorkoutLogRequest(BaseModel):
+    exercises: list[WorkoutExercisePayload]
+    started_at: datetime
+    ended_at: datetime
+    notes: Optional[str] = None
+
+
+class WorkoutLogResponse(BaseModel):
+    workout_id: int
+    win_id: Optional[int] = None
+    set_count: int
+    exercise_count: int

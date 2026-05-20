@@ -32,6 +32,7 @@ USERS = [
         "id": "seth",
         "name": "Seth",
         "email": None,
+        "apple_sub": "seed:seth",   # sentinel — bypassed by X-Seed-User header in non-prod
         "dietary_modality": "maintenance_active",
         "goal": "cut",
         "mode": "gentle",
@@ -42,6 +43,7 @@ USERS = [
         "id": "slav",
         "name": "Slav",
         "email": None,
+        "apple_sub": "seed:slav",
         "dietary_modality": "high_protein_performance",
         "goal": "bulk",
         "mode": "optimizer",
@@ -53,6 +55,7 @@ USERS = [
         "id": "oura_test",
         "name": "Oura Test",
         "email": None,
+        "apple_sub": "seed:oura_test",
         "dietary_modality": "flexible",
         "goal": "maintain",
         "mode": "gentle",
@@ -76,16 +79,17 @@ async def seed(tokens_file):
     for u in USERS:
         await conn.execute(
             """
-            INSERT INTO users (id, name, email, dietary_modality, goal, mode, recovery_source, device)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO users (id, name, email, apple_sub, dietary_modality, goal, mode, recovery_source, device)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
+                apple_sub        = EXCLUDED.apple_sub,
                 dietary_modality = EXCLUDED.dietary_modality,
                 goal             = EXCLUDED.goal,
                 mode             = EXCLUDED.mode,
                 recovery_source  = EXCLUDED.recovery_source,
                 device           = EXCLUDED.device
             """,
-            u["id"], u["name"], u["email"],
+            u["id"], u["name"], u["email"], u.get("apple_sub"),
             u["dietary_modality"], u["goal"], u["mode"], u["recovery_source"],
             u.get("device"),
         )

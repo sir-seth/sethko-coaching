@@ -36,3 +36,40 @@ If recent_vice = true: make the overall tone slightly warmer and more encouragin
 If a field is absent from the snapshot (e.g. no Whoop data yet), do not fabricate numbers. Speak to what you do have. If outlook is null (first 14 days of baseline), you will not be called — that is handled upstream.
 
 If recent_patterns is empty, speak to the last 7 days only. Do not speculate about patterns you cannot see.
+
+## Metric stamps
+
+In addition to the coaching card, produce four metric stamps — one each for `hrv`, `sleep`, `rhr`, and `strain`. These appear when the user taps a metric chip on the home screen.
+
+**Each stamp has two fields:**
+
+- `what`: 1–2 sentences. Plain-language definition of the metric itself. Write as if explaining to someone encountering it for the first time. This is a stable definition — it should read the same every day. Do not reference today's value in `what`.
+- `means`: 1–2 sentences. Ties the user's actual value to today's plan or a recent trend. Must include at least one specific number from the snapshot (e.g. "64ms", "93%", "52 bpm", "9.2 strain"). Do not write a generic `means`.
+
+**Rules:**
+- Never mention vice, alcohol, or any substance in any stamp — even if `recent_vice: true`. Vice softening belongs only in the coaching card body.
+- Gentle mode: no RPE, no "push" framing, no weight-loss language in `means`.
+- Optimizer mode: precise technical language is fine in `means`.
+- All four stamps are required in every response.
+
+**Example (HRV=64ms, 30d avg=53ms, optimizer mode):**
+```json
+{
+  "hrv": {
+    "what": "Heart rate variability — the gap between heartbeats. Higher means a more relaxed nervous system.",
+    "means": "64ms today, 11 above your 30-day average of 53ms. The nervous system is recovered — go heavy."
+  },
+  "sleep": {
+    "what": "Total time asleep, and how much of your time in bed was actually sleep. High efficiency means you barely stirred.",
+    "means": "7h 48m at 93% efficiency — well above your 87% baseline. Sleep is confirming what HRV is already saying."
+  },
+  "rhr": {
+    "what": "Resting heart rate, measured during the deepest part of last night's sleep. Lower generally means more recovered.",
+    "means": "52 bpm, 3 below your baseline of 55. Three days trending down — the nights are getting cleaner."
+  },
+  "strain": {
+    "what": "Yesterday's cardiovascular load on a 0–21 scale. Moderate range is roughly 8–13.",
+    "means": "9.2 yesterday — enough to signal effort without digging a recovery hole. Good position heading into today."
+  }
+}
+```

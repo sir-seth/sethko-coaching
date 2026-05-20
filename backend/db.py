@@ -263,6 +263,85 @@ CREATE TABLE IF NOT EXISTS brief_today (
     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, date)
 );
+
+-- Planned activities — user or Sethko-committed plans for a day (T-27).
+CREATE TABLE IF NOT EXISTS planned_activities (
+    id          SERIAL PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    date        DATE NOT NULL,
+    category    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'user',   -- 'sethko'|'user'
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS planned_activities_user_date ON planned_activities (user_id, date);
+
+-- T-26: Sign in with Apple
+ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_sub TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_apple_sub ON users (apple_sub) WHERE apple_sub IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
+
+-- Backfill sentinel apple_sub for seed users so dev X-Seed-User bypass works.
+UPDATE users SET apple_sub = 'seed:' || id
+WHERE id IN ('seth', 'slav', 'oura_test') AND apple_sub IS NULL;
+
+-- T-29: manual workout logger
+ALTER TABLE workout_log ADD COLUMN IF NOT EXISTS session_source TEXT DEFAULT 'device';
+CREATE TABLE IF NOT EXISTS workout_sets (
+    id            SERIAL PRIMARY KEY,
+    workout_id    INTEGER NOT NULL REFERENCES workout_log(id) ON DELETE CASCADE,
+    exercise_name TEXT NOT NULL,
+    set_idx       INTEGER NOT NULL,
+    reps          INTEGER,
+    weight_lb     REAL,
+    rpe           SMALLINT,
+    skipped       BOOLEAN NOT NULL DEFAULT FALSE,
+    completed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS workout_sets_workout ON workout_sets (workout_id);
+
+-- T-36: push notification registration
+ALTER TABLE users ADD COLUMN IF NOT EXISTS wake_window   TIME    NOT NULL DEFAULT '07:00';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_brief  BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_checkin BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS device_tokens (
+    token         TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    env           TEXT NOT NULL DEFAULT 'sandbox',   -- 'sandbox' | 'production'
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS device_tokens_user ON device_tokens (user_id);
+
+-- T-30: pattern engine findings
+CREATE TABLE IF NOT EXISTS patterns (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    predictor       TEXT NOT NULL,
+    response        TEXT NOT NULL,
+    lag_days        SMALLINT NOT NULL,
+    window_days     SMALLINT NOT NULL,
+    n               SMALLINT NOT NULL,
+    r               REAL NOT NULL,
+    p               REAL NOT NULL,
+    effect          REAL NOT NULL,
+    effect_unit     TEXT NOT NULL,
+    qualifies       BOOLEAN NOT NULL,
+    headline_payload JSONB NOT NULL DEFAULT '{}',
+    body            TEXT NOT NULL DEFAULT '',
+    computed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, predictor, response, lag_days, window_days)
+);
+CREATE INDEX IF NOT EXISTS patterns_user_qualifies
+    ON patterns (user_id, qualifies, computed_at DESC);
 """
 
 
@@ -739,6 +818,64 @@ async def get_brief_today(user_id: str, for_date: date) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Plan index (T-27)
+# ---------------------------------------------------------------------------
+
+def _docket_meta(created_at) -> str:
+    hour = created_at.hour
+    h = hour % 12 or 12
+    ampm = "AM" if hour < 12 else "PM"
+    time_of_day = "this morning" if hour < 12 else ("this afternoon" if hour < 17 else "this evening")
+    return f"~{h}:00 {ampm} · planned {time_of_day}"
+
+
+async def get_docket_items(user_id: str, for_date: date) -> list[dict]:
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, category, name, created_at
+            FROM planned_activities
+            WHERE user_id = $1 AND date = $2
+            ORDER BY created_at ASC
+            """,
+            user_id,
+            for_date,
+        )
+    return [
+        {
+            "id": row["id"],
+            "category": row["category"],
+            "name": row["name"],
+            "meta": _docket_meta(row["created_at"]),
+            "created_at": row["created_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+
+async def commit_plan(user_id: str, for_date: date, category: str, name: str) -> dict:
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO planned_activities (user_id, date, category, name, source)
+            VALUES ($1, $2, $3, $4, 'user')
+            RETURNING id, category, name, created_at
+            """,
+            user_id,
+            for_date,
+            category,
+            name,
+        )
+    return {
+        "id": row["id"],
+        "category": row["category"],
+        "name": row["name"],
+        "meta": _docket_meta(row["created_at"]),
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Subjective check-in (T-17)
 # ---------------------------------------------------------------------------
 
@@ -974,6 +1111,31 @@ async def get_wins(user_id: str, for_date: date) -> list[WinEntry]:
         )
         for r in rows
     ]
+
+
+async def get_mood_wins_range(user_id: str, start: date, end: date):
+    """Batch fetch subjective logs and win counts for a date range (T-34)."""
+    async with _conn() as conn:
+        subj_rows = await conn.fetch(
+            """
+            SELECT date, mood_label, mood_numeric
+            FROM subjective_log
+            WHERE user_id = $1 AND date >= $2 AND date <= $3
+            """,
+            user_id, start, end,
+        )
+        win_rows = await conn.fetch(
+            """
+            SELECT date, COUNT(*) AS win_count
+            FROM win_log
+            WHERE user_id = $1 AND date >= $2 AND date <= $3
+            GROUP BY date
+            """,
+            user_id, start, end,
+        )
+    subj = {r["date"]: r for r in subj_rows}
+    wins = {r["date"]: int(r["win_count"]) for r in win_rows}
+    return subj, wins
 
 
 # ---------------------------------------------------------------------------
@@ -1256,3 +1418,373 @@ async def seed_default_users():
     ]:
         await upsert_user(user)
         log.info("Seeded user: %s", user.id)
+
+
+# ---------------------------------------------------------------------------
+# Sessions (T-26)
+# ---------------------------------------------------------------------------
+
+import secrets as _secrets
+
+
+async def upsert_user_by_apple_sub(
+    apple_sub: str,
+    email: Optional[str],
+    full_name: Optional[str],
+) -> dict:
+    """
+    Create or fetch a user keyed by Apple sub.
+    - On first auth: create with defaults + store email if provided.
+    - On repeat auth: update email if Apple provided it (shouldn't happen, but safe).
+    Returns a plain dict with all user columns.
+    """
+    name = full_name or (email.split("@")[0] if email else "User")
+    async with _conn() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE apple_sub = $1", apple_sub)
+        if row:
+            if email and not row["email"]:
+                await conn.execute(
+                    "UPDATE users SET email = $1 WHERE apple_sub = $2", email, apple_sub
+                )
+                row = await conn.fetchrow("SELECT * FROM users WHERE apple_sub = $1", apple_sub)
+            return dict(row)
+        user_id = _secrets.token_urlsafe(8)
+        row = await conn.fetchrow(
+            """
+            INSERT INTO users (id, name, email, apple_sub)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            """,
+            user_id, name, email, apple_sub,
+        )
+        log.info("Created new user via SIWA: id=%s apple_sub=%s", user_id, apple_sub[:8] + "…")
+        return dict(row)
+
+
+async def create_session(user_id: str) -> str:
+    """Create a new 365-day session. Returns the opaque token."""
+    token = _secrets.token_hex(32)  # 64-char hex
+    expires_at = datetime.now(timezone.utc) + timedelta(days=365)
+    async with _conn() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
+            token, user_id, expires_at,
+        )
+    return token
+
+
+async def resolve_session(token: str) -> Optional[str]:
+    """Return user_id for a valid, non-expired session token, or None."""
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE token = $1 AND expires_at > NOW()",
+            token,
+        )
+    return row["user_id"] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Manual workout logger (T-29)
+# ---------------------------------------------------------------------------
+
+async def insert_manual_workout(user_id: str, payload) -> dict:
+    """
+    Insert a logger-recorded workout into workout_log + workout_sets.
+    Returns {workout_id, set_count, exercise_count}.
+    """
+    from models import WorkoutLogRequest
+    duration_min = (payload.ended_at - payload.started_at).total_seconds() / 60
+
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO workout_log
+                (user_id, started_at, ended_at, modality, source, session_source,
+                 sport_name, duration_min, notes)
+            VALUES ($1, $2, $3, 'strength', 'logger', 'logger', 'Lift', $4, $5)
+            RETURNING id
+            """,
+            user_id,
+            payload.started_at,
+            payload.ended_at,
+            duration_min,
+            payload.notes,
+        )
+        workout_id = row["id"]
+
+        set_count = 0
+        for ex in payload.exercises:
+            if ex.skipped:
+                await conn.execute(
+                    """
+                    INSERT INTO workout_sets
+                        (workout_id, exercise_name, set_idx, reps, weight_lb, rpe, skipped)
+                    VALUES ($1, $2, 0, NULL, NULL, NULL, TRUE)
+                    """,
+                    workout_id, ex.name,
+                )
+            else:
+                for i, s in enumerate(ex.sets, start=1):
+                    await conn.execute(
+                        """
+                        INSERT INTO workout_sets
+                            (workout_id, exercise_name, set_idx, reps, weight_lb, rpe)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                        workout_id, ex.name, i, s.reps, s.weight_lb, s.rpe,
+                    )
+                    set_count += 1
+
+    exercise_count = sum(1 for ex in payload.exercises if not ex.skipped)
+    return {"workout_id": workout_id, "set_count": set_count, "exercise_count": exercise_count}
+
+
+# ---------------------------------------------------------------------------
+# Patterns (T-30)
+# ---------------------------------------------------------------------------
+
+async def upsert_pattern(user_id: str, finding: dict):
+    """Upsert one pattern row. headline_payload is stored as JSONB."""
+    import json as _json
+    async with _conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO patterns
+                (user_id, predictor, response, lag_days, window_days,
+                 n, r, p, effect, effect_unit, qualifies, headline_payload, body, computed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+            ON CONFLICT (user_id, predictor, response, lag_days, window_days) DO UPDATE SET
+                n               = EXCLUDED.n,
+                r               = EXCLUDED.r,
+                p               = EXCLUDED.p,
+                effect          = EXCLUDED.effect,
+                effect_unit     = EXCLUDED.effect_unit,
+                qualifies       = EXCLUDED.qualifies,
+                headline_payload = EXCLUDED.headline_payload,
+                body            = EXCLUDED.body,
+                computed_at     = NOW()
+            """,
+            user_id,
+            finding["predictor"],
+            finding["response"],
+            finding["lag_days"],
+            finding["window_days"],
+            finding["n"],
+            finding["r"],
+            finding["p"],
+            finding["effect"],
+            finding["effect_unit"],
+            finding["qualifies"],
+            _json.dumps(finding.get("headline_payload", {})),
+            finding.get("body", ""),
+        )
+
+
+async def get_patterns_top(user_id: str) -> Optional[dict]:
+    """Return the best qualifying finding (highest abs(r))."""
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM patterns
+            WHERE user_id = $1 AND qualifies = TRUE
+            ORDER BY
+                abs(r) DESC,
+                abs(effect) DESC,
+                CASE WHEN predictor LIKE 'subjective.%%' THEN 0 ELSE 1 END ASC
+            LIMIT 1
+            """,
+            user_id,
+        )
+    if not row:
+        return None
+    return _pattern_row_to_dict(row)
+
+
+async def get_patterns_drivers(user_id: str, response_key: str, limit: int = 5) -> list[dict]:
+    """Return qualifying findings for a given response key, sorted by abs(effect) desc."""
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM patterns
+            WHERE user_id = $1 AND response = $2 AND qualifies = TRUE
+            ORDER BY abs(effect) DESC
+            LIMIT $3
+            """,
+            user_id, response_key, limit,
+        )
+    return [_pattern_row_to_dict(r) for r in rows]
+
+
+async def get_patterns_days_observed(user_id: str, window_days: int = 28) -> int:
+    """
+    Count distinct calendar days with any data (recovery_signal OR subjective_log)
+    within the most recent window_days.
+    """
+    from datetime import date, timedelta
+    start = date.today() - timedelta(days=window_days - 1)
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(DISTINCT d)::INTEGER AS n
+            FROM (
+                SELECT date AS d FROM recovery_signal
+                WHERE user_id = $1 AND date >= $2
+                UNION
+                SELECT date AS d FROM subjective_log
+                WHERE user_id = $1 AND date >= $2
+            ) t
+            """,
+            user_id, start,
+        )
+    return int(row["n"]) if row else 0
+
+
+def _pattern_row_to_dict(row) -> dict:
+    import json as _json
+    hp = row["headline_payload"]
+    if isinstance(hp, str):
+        hp = _json.loads(hp)
+    return {
+        "id":              row["id"],
+        "predictor":       row["predictor"],
+        "response":        row["response"],
+        "lag_days":        row["lag_days"],
+        "window_days":     row["window_days"],
+        "n":               row["n"],
+        "r":               row["r"],
+        "p":               row["p"],
+        "effect":          row["effect"],
+        "effect_unit":     row["effect_unit"],
+        "qualifies":       row["qualifies"],
+        "headline_payload": hp,
+        "body":            row["body"],
+        "computed_at":     row["computed_at"].isoformat() if row["computed_at"] else None,
+    }
+
+
+async def delete_user_cascade(user_id: str):
+    """
+    Hard-delete a user and all their data.
+    Required by Apple App Store guideline 5.1.1(v).
+    Sessions cascade via ON DELETE CASCADE on the sessions table.
+    All other tables are deleted explicitly.
+    """
+    async with _conn() as conn:
+        for table in (
+            "device_tokens",
+            "subjective_log",
+            "win_log",
+            "nutrition_log",
+            "vice_log",
+            "vice_categories",
+            "workout_log",
+            "health_metrics",
+            "recovery_signal",
+            "coaching_outputs",
+            "brief_today",
+            "whoop_tokens",
+        ):
+            await conn.execute(f"DELETE FROM {table} WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+    log.info("Cascade-deleted user and all data: user_id=%s", user_id)
+
+
+# ---------------------------------------------------------------------------
+# Push notifications (T-36)
+# ---------------------------------------------------------------------------
+
+async def register_device_token(user_id: str, token: str, env: str) -> None:
+    """Upsert a device token. Called on every app launch (idempotent)."""
+    async with _conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO device_tokens (token, user_id, env, registered_at, last_seen)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (token) DO UPDATE SET
+                user_id   = EXCLUDED.user_id,
+                env       = EXCLUDED.env,
+                last_seen = NOW()
+            """,
+            token, user_id, env,
+        )
+
+
+async def unregister_device_tokens(user_id: str) -> None:
+    """Remove all device tokens for a user (opt-out)."""
+    async with _conn() as conn:
+        await conn.execute("DELETE FROM device_tokens WHERE user_id = $1", user_id)
+
+
+async def get_push_prefs(user_id: str) -> dict:
+    """Return {notify_brief, notify_checkin, wake_window} for a user."""
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT notify_brief, notify_checkin, wake_window FROM users WHERE id = $1",
+            user_id,
+        )
+    if not row:
+        return {"notify_brief": False, "notify_checkin": False, "wake_window": "07:00"}
+    wake = row["wake_window"]
+    wake_str = wake.strftime("%H:%M") if hasattr(wake, "strftime") else str(wake)[:5]
+    return {
+        "notify_brief":   row["notify_brief"],
+        "notify_checkin": row["notify_checkin"],
+        "wake_window":    wake_str,
+    }
+
+
+async def update_push_prefs(
+    user_id: str,
+    notify_brief: Optional[bool] = None,
+    notify_checkin: Optional[bool] = None,
+    wake_window: Optional[str] = None,
+) -> None:
+    """Partial-update push preferences."""
+    updates = []
+    params: list = []
+    idx = 1
+    if notify_brief is not None:
+        updates.append(f"notify_brief = ${idx}");  params.append(notify_brief);  idx += 1
+    if notify_checkin is not None:
+        updates.append(f"notify_checkin = ${idx}"); params.append(notify_checkin); idx += 1
+    if wake_window is not None:
+        updates.append(f"wake_window = ${idx}");   params.append(wake_window);   idx += 1
+    if not updates:
+        return
+    params.append(user_id)
+    sql = f"UPDATE users SET {', '.join(updates)} WHERE id = ${idx}"
+    async with _conn() as conn:
+        await conn.execute(sql, *params)
+
+
+async def get_users_for_push(kind: str) -> list[dict]:
+    """
+    Return users whose push flag is enabled and who have at least one device token.
+    kind: 'brief' | 'checkin'
+    Each dict: {user_id, wake_window, tokens: [{token, env}]}
+    """
+    flag_col = "notify_brief" if kind == "brief" else "notify_checkin"
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT u.id AS user_id,
+                   u.wake_window,
+                   dt.token,
+                   dt.env
+            FROM users u
+            JOIN device_tokens dt ON dt.user_id = u.id
+            WHERE u.{flag_col} = TRUE
+            ORDER BY u.id, dt.last_seen DESC
+            """,
+        )
+    # Group tokens per user
+    by_user: dict[str, dict] = {}
+    for r in rows:
+        uid = r["user_id"]
+        if uid not in by_user:
+            wake = r["wake_window"]
+            wake_str = wake.strftime("%H:%M") if hasattr(wake, "strftime") else str(wake)[:5]
+            by_user[uid] = {"user_id": uid, "wake_window": wake_str, "tokens": []}
+        by_user[uid]["tokens"].append({"token": r["token"], "env": r["env"]})
+    return list(by_user.values())

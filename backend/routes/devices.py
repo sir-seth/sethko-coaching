@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse, JSONResponse
 
 import db
-from auth import require_api_key
+from auth import get_current_user_id
 from jobs.oura_pull import (
     build_authorize_url,
     exchange_code,
@@ -40,11 +40,11 @@ def _redirect_uri() -> str:
 # Start Oura OAuth (PKCE)
 # ---------------------------------------------------------------------------
 
-@router.post("/oura/connect", dependencies=[Depends(require_api_key)])
-async def oura_connect(user_id: str = Query(...)):
+@router.post("/oura/connect")
+async def oura_connect(user_id: str = Depends(get_current_user_id)):
     user = await db.get_user(user_id)
     if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
+        raise HTTPException(status_code=404, detail="User not found.")
 
     verifier, challenge = generate_pkce_pair()
     await db.save_oura_pkce_verifier(user_id, verifier)
@@ -64,7 +64,7 @@ async def oura_connect(user_id: str = Query(...)):
 @router.get("/oura/callback")
 async def oura_callback(
     code:  str = Query(...),
-    state: str = Query(...),    # user_id
+    state: str = Query(...),    # user_id set during connect
     error: str | None = Query(None),
 ):
     if error:
@@ -99,11 +99,11 @@ async def oura_callback(
 # Disconnect Oura
 # ---------------------------------------------------------------------------
 
-@router.delete("/oura", dependencies=[Depends(require_api_key)])
-async def oura_disconnect(user_id: str = Query(...)):
+@router.delete("/oura")
+async def oura_disconnect(user_id: str = Depends(get_current_user_id)):
     user = await db.get_user(user_id)
     if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
+        raise HTTPException(status_code=404, detail="User not found.")
     await db.disconnect_oura(user_id)
     log.info("Oura disconnected for user=%s", user_id)
     return {"disconnected": True}
@@ -113,8 +113,8 @@ async def oura_disconnect(user_id: str = Query(...)):
 # Device status (masthead chip)
 # ---------------------------------------------------------------------------
 
-@router.get("", dependencies=[Depends(require_api_key)])
-async def get_device_status(user_id: str = Query(...)):
+@router.get("")
+async def get_device_status(user_id: str = Depends(get_current_user_id)):
     """
     Returns { device, synced_at, error } for the masthead chip.
     device: "whoop" | "oura" | null
@@ -123,7 +123,7 @@ async def get_device_status(user_id: str = Query(...)):
     """
     user = await db.get_user(user_id)
     if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id!r} not found.")
+        raise HTTPException(status_code=404, detail="User not found.")
 
     status = await db.get_device_status(user_id)
 
