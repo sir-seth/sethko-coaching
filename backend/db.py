@@ -21,6 +21,9 @@ import asyncpg
 from models import (
     CheckInRequest,
     CoachingResponse,
+    DayMacros,
+    FoodEntry,
+    FoodEntryRequest,
     HealthSnapshot,
     LogEntry,
     MOOD_NUMERIC,
@@ -29,6 +32,7 @@ from models import (
     SubjectiveLog,
     User,
     WeightPoint,
+    WeekDayStatus,
     WinEntry,
     WinRequest,
     WorkoutEntry,
@@ -174,17 +178,35 @@ ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS mood_numeric SMALLINT;
 ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS motivation SMALLINT;
 ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS clarity SMALLINT;
 
--- Food log entries. Populated in Phase 2 (T-21).
+-- Food log entries (T-21).
 CREATE TABLE IF NOT EXISTS nutrition_log (
     id           SERIAL PRIMARY KEY,
     user_id      TEXT NOT NULL REFERENCES users(id),
     logged_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     description  TEXT NOT NULL,
+    weight_g     REAL,
     kcal         INTEGER,
     protein_g    REAL,
     carbs_g      REAL,
     fat_g        REAL,
+    meal_label   TEXT,          -- 'breakfast'|'lunch'|'snack'|'dinner'
     source       TEXT           -- 'manual', 'voice', 'barcode'
+);
+ALTER TABLE nutrition_log ADD COLUMN IF NOT EXISTS weight_g REAL;
+ALTER TABLE nutrition_log ADD COLUMN IF NOT EXISTS meal_label TEXT;
+CREATE INDEX IF NOT EXISTS nutrition_log_user_time ON nutrition_log (user_id, logged_at);
+
+-- USDA food cache to avoid repeated API calls (T-21).
+CREATE TABLE IF NOT EXISTS recent_foods (
+    id              SERIAL PRIMARY KEY,
+    query           TEXT NOT NULL UNIQUE,
+    fdc_id          INTEGER,
+    description     TEXT NOT NULL,
+    kcal_per_100g   REAL NOT NULL DEFAULT 0,
+    protein_per_100g REAL NOT NULL DEFAULT 0,
+    fat_per_100g    REAL NOT NULL DEFAULT 0,
+    carbs_per_100g  REAL NOT NULL DEFAULT 0,
+    cached_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Win log (T-18). One row per win; multiple wins allowed per day.
@@ -730,6 +752,157 @@ async def get_wins(user_id: str, for_date: date) -> list[WinEntry]:
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Food log (T-21)
+# ---------------------------------------------------------------------------
+
+async def insert_food_entry(user_id: str, payload: FoodEntryRequest) -> FoodEntry:
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO nutrition_log
+                (user_id, description, weight_g, kcal, protein_g, fat_g, carbs_g, meal_label, source)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, description, weight_g, kcal, protein_g, fat_g, carbs_g, meal_label, logged_at
+            """,
+            user_id,
+            payload.description,
+            payload.weight_g,
+            payload.kcal,
+            payload.protein_g,
+            payload.fat_g,
+            payload.carbs_g,
+            payload.meal_label,
+            payload.source,
+        )
+    return FoodEntry(
+        id=row["id"],
+        description=row["description"],
+        weight_g=row["weight_g"],
+        kcal=row["kcal"],
+        protein_g=row["protein_g"],
+        fat_g=row["fat_g"],
+        carbs_g=row["carbs_g"],
+        meal_label=row["meal_label"],
+        logged_at=row["logged_at"],
+    )
+
+
+async def get_food_entries(user_id: str, for_date: date) -> list[FoodEntry]:
+    start = datetime(for_date.year, for_date.month, for_date.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, description, weight_g, kcal, protein_g, fat_g, carbs_g, meal_label, logged_at
+            FROM nutrition_log
+            WHERE user_id = $1 AND logged_at >= $2 AND logged_at < $3
+            ORDER BY logged_at ASC
+            """,
+            user_id, start, end,
+        )
+    return [
+        FoodEntry(
+            id=r["id"],
+            description=r["description"],
+            weight_g=r["weight_g"],
+            kcal=r["kcal"],
+            protein_g=r["protein_g"],
+            fat_g=r["fat_g"],
+            carbs_g=r["carbs_g"],
+            meal_label=r["meal_label"],
+            logged_at=r["logged_at"],
+        )
+        for r in rows
+    ]
+
+
+async def get_day_macros(user_id: str, for_date: date) -> DayMacros:
+    start = datetime(for_date.year, for_date.month, for_date.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)          AS entry_count,
+                COALESCE(SUM(kcal), 0)      AS kcal,
+                COALESCE(SUM(protein_g), 0) AS protein_g,
+                COALESCE(SUM(fat_g), 0)     AS fat_g,
+                COALESCE(SUM(carbs_g), 0)   AS carbs_g
+            FROM nutrition_log
+            WHERE user_id = $1 AND logged_at >= $2 AND logged_at < $3
+            """,
+            user_id, start, end,
+        )
+    return DayMacros(
+        date=for_date.isoformat(),
+        kcal=int(row["kcal"]),
+        protein_g=float(row["protein_g"]),
+        fat_g=float(row["fat_g"]),
+        carbs_g=float(row["carbs_g"]),
+        entry_count=int(row["entry_count"]),
+    )
+
+
+async def get_week_food_status(user_id: str, week_dates: list[date]) -> list[WeekDayStatus]:
+    today = date.today()
+    result = []
+    for d in week_dates:
+        if d > today:
+            result.append(WeekDayStatus(date=d.isoformat(), status="future", kcal=0))
+            continue
+        macros = await get_day_macros(user_id, d)
+        if d == today:
+            status = "today"
+        elif macros.kcal >= 1000:
+            status = "logged"
+        elif macros.entry_count > 0:
+            status = "partial"
+        else:
+            status = "skipped"
+        result.append(WeekDayStatus(date=d.isoformat(), status=status, kcal=macros.kcal))
+    return result
+
+
+async def cache_food(query: str, usda: dict):
+    async with _conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO recent_foods
+                (query, fdc_id, description, kcal_per_100g, protein_per_100g, fat_per_100g, carbs_per_100g)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (query) DO UPDATE SET
+                fdc_id           = EXCLUDED.fdc_id,
+                description      = EXCLUDED.description,
+                kcal_per_100g    = EXCLUDED.kcal_per_100g,
+                protein_per_100g = EXCLUDED.protein_per_100g,
+                fat_per_100g     = EXCLUDED.fat_per_100g,
+                carbs_per_100g   = EXCLUDED.carbs_per_100g,
+                cached_at        = NOW()
+            """,
+            query.lower(),
+            usda.get("fdc_id"),
+            usda["description"],
+            usda["kcal_per_100g"],
+            usda["protein_per_100g"],
+            usda["fat_per_100g"],
+            usda["carbs_per_100g"],
+        )
+
+
+async def lookup_cached_food(query: str) -> Optional[dict]:
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT fdc_id, description, kcal_per_100g, protein_per_100g, fat_per_100g, carbs_per_100g
+            FROM recent_foods
+            WHERE query = $1 AND cached_at > NOW() - INTERVAL '24 hours'
+            """,
+            query.lower(),
+        )
+    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------

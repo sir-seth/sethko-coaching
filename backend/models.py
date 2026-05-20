@@ -211,3 +211,54 @@ class LogEntry(BaseModel):
     text: str
     meta: str
     logged_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Food log (T-21)
+# ---------------------------------------------------------------------------
+
+class FoodEntryRequest(BaseModel):
+    description: str
+    weight_g: Optional[float] = None
+    kcal: Optional[int] = None
+    protein_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    carbs_g: Optional[float] = None
+    meal_label: Optional[str] = None   # "breakfast" | "lunch" | "snack" | "dinner"
+    source: str = "voice"              # "voice" | "manual"
+
+
+class FoodEntry(BaseModel):
+    id: int
+    description: str
+    weight_g: Optional[float] = None
+    kcal: Optional[int] = None
+    protein_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    carbs_g: Optional[float] = None
+    meal_label: Optional[str] = None
+    logged_at: datetime
+
+
+class ParsedFoodItem(BaseModel):
+    description: str
+    weight_g: Optional[float] = None
+    kcal: Optional[int] = None
+    protein_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    carbs_g: Optional[float] = None
+
+
+class DayMacros(BaseModel):
+    date: str                          # "YYYY-MM-DD"
+    kcal: int
+    protein_g: float
+    fat_g: float
+    carbs_g: float
+    entry_count: int
+
+
+class WeekDayStatus(BaseModel):
+    date: str                          # "YYYY-MM-DD"
+    status: str                        # "logged" | "partial" | "today" | "skipped" | "future"
+    kcal: int

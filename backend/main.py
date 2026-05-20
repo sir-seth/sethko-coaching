@@ -58,12 +58,14 @@ from routes.brief import router as brief_router
 from routes.checkin import router as checkin_router
 from routes.wins import router as wins_router
 from routes.log import router as log_router
+from routes.food import router as food_router
 
 app.include_router(health_router)
 app.include_router(brief_router)
 app.include_router(checkin_router)
 app.include_router(wins_router)
 app.include_router(log_router)
+app.include_router(food_router)
 
 
 # ---------------------------------------------------------------------------
