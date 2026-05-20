@@ -46,6 +46,7 @@ def build_digest(
     weight_trend: list[WeightPoint],
     outlook=None,
     yesterday_subjective: Optional[SubjectiveLog] = None,
+    recent_vice: bool = False,
 ) -> dict:
     """
     Assemble the compact data snapshot Claude reasons over.
@@ -123,6 +124,8 @@ def build_digest(
             "clarity": yesterday_subjective.clarity,
             "note": yesterday_subjective.note,
         } if yesterday_subjective else None,
+        # Privacy contract: boolean only. No category, no count, no detail. Ever.
+        "recent_vice": recent_vice,
     }
 
 
@@ -168,6 +171,7 @@ Universal rules:
 - Never give generic advice like "stay hydrated" without grounding it in the data.
 - If a field appears in data_gaps, do not fabricate numbers for it. For nutrition_target_today, still set targets based on goal and estimated needs, but note in rationale that the relevant data is unavailable. For weight_trend, if weight data is missing, say so plainly in the headline.
 - Output ONLY the JSON object. No preamble, no markdown fences, no closing remarks.
+- If recent_vice is true in the digest: soften today's coaching tone slightly — be a little gentler and more encouraging. Do NOT mention the vice, reference it, or allude to it in any way. Just make the overall tone warmer.
 """
 
 MODALITY_BLOCKS = {
@@ -332,6 +336,7 @@ async def run_pipeline(user_id: str, user: User) -> CoachingResponse:
     weight_trend = await db.get_weight_trend(user_id, days=30)
     recovery_history = await db.get_recovery_signals(user_id, days=30)
     yesterday_subjective = await db.get_subjective_log(user_id, date.today() - timedelta(days=1))
+    recent_vice = await db.had_recent_vice(user_id)
 
     # Step 2b — Outlook
     outlook = compute_outlook(sorted(recovery_history, key=lambda s: s.date))
@@ -345,6 +350,7 @@ async def run_pipeline(user_id: str, user: User) -> CoachingResponse:
         weight_trend=weight_trend,
         outlook=outlook,
         yesterday_subjective=yesterday_subjective,
+        recent_vice=recent_vice,
     )
 
     # Step 4 — Claude

@@ -31,6 +31,10 @@ from models import (
     RecoverySignal,
     SubjectiveLog,
     User,
+    ViceCategory,
+    ViceCategoryRequest,
+    ViceLogEntry,
+    ViceLogResponse,
     WeightPoint,
     WeekDayStatus,
     WinEntry,
@@ -208,6 +212,27 @@ CREATE TABLE IF NOT EXISTS recent_foods (
     carbs_per_100g  REAL NOT NULL DEFAULT 0,
     cached_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Vice category list — user-defined, private, never sent to Claude (T-22).
+CREATE TABLE IF NOT EXISTS vice_categories (
+    id          SERIAL PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    label       TEXT NOT NULL,
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    deleted_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS vice_categories_user ON vice_categories (user_id) WHERE deleted_at IS NULL;
+
+-- Vice log — timestamp only. category_id is the only optional detail. No freetext ever.
+CREATE TABLE IF NOT EXISTS vice_log (
+    id           SERIAL PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    logged_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    category_id  INTEGER REFERENCES vice_categories(id)
+    -- NO notes, description, or freetext columns. The privacy promise is the product.
+);
+CREATE INDEX IF NOT EXISTS vice_log_user_time ON vice_log (user_id, logged_at);
 
 -- Win log (T-18). One row per win; multiple wins allowed per day.
 CREATE TABLE IF NOT EXISTS win_log (
@@ -903,6 +928,123 @@ async def lookup_cached_food(query: str) -> Optional[dict]:
             query.lower(),
         )
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Vice log (T-22)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CATEGORIES = [
+    "alcohol",
+    "cannabis",
+    "late night eating",
+    "doom scrolling",
+    "gambling",
+]
+
+
+async def _seed_vice_categories(user_id: str, conn):
+    """Insert default categories if the user has none. Called on first vice log."""
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM vice_categories WHERE user_id = $1 AND deleted_at IS NULL",
+        user_id,
+    )
+    if count == 0:
+        for i, label in enumerate(_DEFAULT_CATEGORIES):
+            await conn.execute(
+                "INSERT INTO vice_categories (user_id, label, sort_order) VALUES ($1, $2, $3)",
+                user_id, label, i,
+            )
+
+
+async def log_vice(user_id: str, category_id: Optional[int]) -> ViceLogResponse:
+    async with _conn() as conn:
+        await _seed_vice_categories(user_id, conn)
+        row = await conn.fetchrow(
+            "INSERT INTO vice_log (user_id, category_id) VALUES ($1, $2) RETURNING id, logged_at",
+            user_id, category_id,
+        )
+    return ViceLogResponse(id=row["id"], logged_at=row["logged_at"])
+
+
+async def get_vice_categories(user_id: str) -> list[ViceCategory]:
+    async with _conn() as conn:
+        await _seed_vice_categories(user_id, conn)
+        rows = await conn.fetch(
+            """
+            SELECT id, label, sort_order FROM vice_categories
+            WHERE user_id = $1 AND deleted_at IS NULL
+            ORDER BY sort_order ASC, created_at ASC
+            """,
+            user_id,
+        )
+    return [ViceCategory(id=r["id"], label=r["label"], sort_order=r["sort_order"]) for r in rows]
+
+
+async def add_vice_category(user_id: str, label: str) -> ViceCategory:
+    async with _conn() as conn:
+        max_order = await conn.fetchval(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM vice_categories WHERE user_id = $1",
+            user_id,
+        )
+        row = await conn.fetchrow(
+            "INSERT INTO vice_categories (user_id, label, sort_order) VALUES ($1, $2, $3) RETURNING id, label, sort_order",
+            user_id, label[:32], (max_order or 0) + 1,
+        )
+    return ViceCategory(id=row["id"], label=row["label"], sort_order=row["sort_order"])
+
+
+async def delete_vice_category(user_id: str, category_id: int) -> bool:
+    async with _conn() as conn:
+        result = await conn.execute(
+            "UPDATE vice_categories SET deleted_at = NOW() WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+            category_id, user_id,
+        )
+    return result == "UPDATE 1"
+
+
+async def get_recent_vice(user_id: str, days: int = 90) -> list[ViceLogEntry]:
+    """Returns timestamp + category_id only — no labels. Used by pattern engine."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    async with _conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT vl.id, vl.logged_at, vl.category_id, vc.label AS category_label
+            FROM vice_log vl
+            LEFT JOIN vice_categories vc ON vl.category_id = vc.id
+            WHERE vl.user_id = $1 AND vl.logged_at >= $2
+            ORDER BY vl.logged_at DESC
+            """,
+            user_id, cutoff,
+        )
+    return [
+        ViceLogEntry(
+            id=r["id"],
+            logged_at=r["logged_at"],
+            category_id=r["category_id"],
+            category_label=r["category_label"],
+        )
+        for r in rows
+    ]
+
+
+async def had_recent_vice(user_id: str) -> bool:
+    """True if user logged a vice in the last 24 hours. Used for coaching digest only."""
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM vice_log WHERE user_id = $1 AND logged_at > NOW() - INTERVAL '24 hours' LIMIT 1",
+            user_id,
+        )
+    return row is not None
+
+
+async def delete_vice_log_entry(user_id: str, log_id: int) -> bool:
+    async with _conn() as conn:
+        result = await conn.execute(
+            "DELETE FROM vice_log WHERE id = $1 AND user_id = $2",
+            log_id, user_id,
+        )
+    return result == "DELETE 1"
 
 
 # ---------------------------------------------------------------------------

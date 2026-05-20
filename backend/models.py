@@ -262,3 +262,30 @@ class WeekDayStatus(BaseModel):
     date: str                          # "YYYY-MM-DD"
     status: str                        # "logged" | "partial" | "today" | "skipped" | "future"
     kcal: int
+
+
+# ---------------------------------------------------------------------------
+# Vice log (T-22)
+# ---------------------------------------------------------------------------
+
+class ViceCategory(BaseModel):
+    id: int
+    label: str
+    sort_order: int = 0
+
+
+class ViceLogEntry(BaseModel):
+    id: int
+    logged_at: datetime
+    category_id: Optional[int] = None
+    # category_label is only shown in-app; never in coaching or analytics
+    category_label: Optional[str] = None
+
+
+class ViceLogResponse(BaseModel):
+    id: int
+    logged_at: datetime
+
+
+class ViceCategoryRequest(BaseModel):
+    label: str
