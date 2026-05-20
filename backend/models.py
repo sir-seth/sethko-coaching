@@ -45,8 +45,9 @@ class User(BaseModel):
     email: Optional[str] = None
     dietary_modality: DietaryModality
     goal: Goal
-    mode: CoachingMode = "gentle"
+    mode: Optional[CoachingMode] = None   # None = not yet chosen (T-24 first-run)
     recovery_source: RecoverySource = "whoop"
+    device: Optional[str] = None          # active wearable: "whoop" | "oura" | None (T-25)
     # Optional manual macro overrides. None means Claude sets targets dynamically.
     macro_targets: Optional[dict[str, Any]] = None
     created_at: Optional[datetime] = None
@@ -142,6 +143,30 @@ class CoachingResponse(BaseModel):
     workout_suggestion: WorkoutSuggestion
     daily_brief: str
     generated_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Daily brief — new schema (T-23)
+# ---------------------------------------------------------------------------
+
+class CoachingCard(BaseModel):
+    eyebrow: str
+    headline: str
+    body: str
+    action_label: str
+
+
+class BriefTodayPayload(BaseModel):
+    coaching_card: Optional[CoachingCard] = None
+    metric_stamps: Optional[Any] = None   # Always None until T-35
+
+
+# ---------------------------------------------------------------------------
+# Profile / mode (T-24)
+# ---------------------------------------------------------------------------
+
+class ModeUpdateRequest(BaseModel):
+    mode: CoachingMode
 
 
 # ---------------------------------------------------------------------------

@@ -81,14 +81,23 @@ CREATE TABLE IF NOT EXISTS users (
     email             TEXT,
     dietary_modality  TEXT NOT NULL DEFAULT 'flexible',
     goal              TEXT NOT NULL DEFAULT 'maintain',
-    mode              TEXT NOT NULL DEFAULT 'gentle',
+    mode              TEXT DEFAULT NULL,   -- NULL = not yet chosen; T-24 first-run flow
     recovery_source   TEXT NOT NULL DEFAULT 'whoop',
+    device            TEXT DEFAULT NULL,   -- active wearable: "whoop" | "oura" | null (T-25)
+    oura_raw          JSONB,               -- Oura tokens + last-pulled cursor (T-25)
+    sync_state        JSONB,               -- { synced_at, error } per device (T-25)
     macro_targets     JSONB,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Add mode column if upgrading from a schema that predates it.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'gentle';
+-- Add mode column if upgrading from a schema that predates it (T-24).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT NULL;
+-- Drop NOT NULL constraint on mode for existing installs that had DEFAULT 'gentle'.
+ALTER TABLE users ALTER COLUMN mode DROP NOT NULL;
+-- T-25: Oura device columns.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS device TEXT DEFAULT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS oura_raw JSONB;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sync_state JSONB;
 
 CREATE TABLE IF NOT EXISTS whoop_tokens (
     user_id        TEXT PRIMARY KEY REFERENCES users(id),
@@ -245,6 +254,15 @@ CREATE TABLE IF NOT EXISTS win_log (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS win_log_user_date ON win_log (user_id, date);
+
+-- Daily coaching brief (T-23). Replaces coaching_outputs as the iOS-facing payload.
+CREATE TABLE IF NOT EXISTS brief_today (
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    date         DATE NOT NULL,
+    payload      JSONB NOT NULL,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, date)
+);
 """
 
 
@@ -271,6 +289,7 @@ async def get_user(user_id: str) -> Optional[User]:
         goal=row["goal"],
         mode=row["mode"],
         recovery_source=row["recovery_source"],
+        device=row["device"],
         macro_targets=row["macro_targets"],
         created_at=row["created_at"],
     )
@@ -539,6 +558,184 @@ async def save_coaching_output(user_id: str, digest: dict, response: dict):
             json.dumps(digest),
             json.dumps(response),
         )
+
+
+# ---------------------------------------------------------------------------
+# Mode update (T-24)
+# ---------------------------------------------------------------------------
+
+async def update_user_mode(user_id: str, mode: str):
+    async with _conn() as conn:
+        await conn.execute(
+            "UPDATE users SET mode = $1 WHERE id = $2",
+            mode,
+            user_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Oura tokens + device status (T-25)
+# ---------------------------------------------------------------------------
+
+async def get_oura_tokens(user_id: str) -> Optional[dict]:
+    async with _conn() as conn:
+        row = await conn.fetchrow("SELECT oura_raw FROM users WHERE id = $1", user_id)
+    if not row or not row["oura_raw"]:
+        return None
+    raw = row["oura_raw"]
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    if not data.get("access_token"):
+        return None
+    return data
+
+
+async def save_oura_tokens(user_id: str, tokens: dict):
+    """Merge tokens into users.oura_raw, preserving any other fields (e.g. pending_verifier)."""
+    async with _conn() as conn:
+        row = await conn.fetchrow("SELECT oura_raw FROM users WHERE id = $1", user_id)
+        existing = {}
+        if row and row["oura_raw"]:
+            existing = json.loads(row["oura_raw"]) if isinstance(row["oura_raw"], str) else row["oura_raw"]
+        merged = {**existing, **tokens}
+        await conn.execute(
+            "UPDATE users SET oura_raw = $1::jsonb WHERE id = $2",
+            json.dumps(merged),
+            user_id,
+        )
+
+
+async def save_oura_pkce_verifier(user_id: str, verifier: str):
+    """Store the PKCE code_verifier temporarily until callback completes."""
+    async with _conn() as conn:
+        row = await conn.fetchrow("SELECT oura_raw FROM users WHERE id = $1", user_id)
+        existing = {}
+        if row and row["oura_raw"]:
+            existing = json.loads(row["oura_raw"]) if isinstance(row["oura_raw"], str) else row["oura_raw"]
+        existing["pending_verifier"] = verifier
+        await conn.execute(
+            "UPDATE users SET oura_raw = $1::jsonb WHERE id = $2",
+            json.dumps(existing),
+            user_id,
+        )
+
+
+async def get_oura_pkce_verifier(user_id: str) -> Optional[str]:
+    """Read the pending PKCE code_verifier stored before the OAuth redirect."""
+    async with _conn() as conn:
+        row = await conn.fetchrow("SELECT oura_raw FROM users WHERE id = $1", user_id)
+    if not row or not row["oura_raw"]:
+        return None
+    raw = row["oura_raw"]
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    return data.get("pending_verifier")
+
+
+async def clear_oura_pkce_verifier(user_id: str):
+    async with _conn() as conn:
+        row = await conn.fetchrow("SELECT oura_raw FROM users WHERE id = $1", user_id)
+        if row and row["oura_raw"]:
+            raw = json.loads(row["oura_raw"]) if isinstance(row["oura_raw"], str) else row["oura_raw"]
+            raw.pop("pending_verifier", None)
+            await conn.execute(
+                "UPDATE users SET oura_raw = $1::jsonb WHERE id = $2",
+                json.dumps(raw),
+                user_id,
+            )
+
+
+async def update_user_device(user_id: str, device: Optional[str]):
+    async with _conn() as conn:
+        await conn.execute(
+            "UPDATE users SET device = $1 WHERE id = $2",
+            device,
+            user_id,
+        )
+
+
+async def update_sync_state(user_id: str, state: dict):
+    async with _conn() as conn:
+        await conn.execute(
+            "UPDATE users SET sync_state = $1::jsonb WHERE id = $2",
+            json.dumps(state),
+            user_id,
+        )
+
+
+async def get_device_status(user_id: str) -> dict:
+    """
+    Returns { device, synced_at, error } used by GET /api/devices and the masthead chip.
+    synced_at comes from the latest recovery_signal row for this user.
+    """
+    async with _conn() as conn:
+        user_row = await conn.fetchrow(
+            "SELECT device, sync_state FROM users WHERE id = $1", user_id
+        )
+        if not user_row:
+            return {"device": None, "synced_at": None, "error": None}
+
+        sync_state_raw = user_row["sync_state"]
+        sync_state = {}
+        if sync_state_raw:
+            sync_state = json.loads(sync_state_raw) if isinstance(sync_state_raw, str) else sync_state_raw
+
+        # Use the timestamp of the latest recovery_signal row as synced_at.
+        latest = await conn.fetchrow(
+            """
+            SELECT created_at FROM recovery_signal
+            WHERE user_id = $1
+            ORDER BY date DESC, created_at DESC
+            LIMIT 1
+            """,
+            user_id,
+        )
+        synced_at = latest["created_at"].isoformat() if latest else None
+
+        return {
+            "device":    user_row["device"],
+            "synced_at": synced_at,
+            "error":     sync_state.get("error"),
+        }
+
+
+async def disconnect_oura(user_id: str):
+    async with _conn() as conn:
+        await conn.execute(
+            "UPDATE users SET device = NULL, oura_raw = NULL WHERE id = $1",
+            user_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Daily brief — brief_today (T-23)
+# ---------------------------------------------------------------------------
+
+async def save_brief_today(user_id: str, for_date: date, payload: dict):
+    async with _conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO brief_today (user_id, date, payload, generated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (user_id, date) DO UPDATE SET
+                payload      = EXCLUDED.payload,
+                generated_at = NOW()
+            """,
+            user_id,
+            for_date,
+            json.dumps(payload),
+        )
+
+
+async def get_brief_today(user_id: str, for_date: date) -> Optional[dict]:
+    async with _conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload FROM brief_today WHERE user_id = $1 AND date = $2",
+            user_id,
+            for_date,
+        )
+    if not row:
+        return None
+    data = row["payload"]
+    return json.loads(data) if isinstance(data, str) else data
 
 
 # ---------------------------------------------------------------------------
@@ -1052,14 +1249,10 @@ async def delete_vice_log_entry(user_id: str, log_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 async def seed_default_users():
-    """Insert Seth if he doesn't exist. Run once after first deploy."""
-    seth = User(
-        id="seth",
-        name="Seth",
-        dietary_modality="maintenance_active",
-        goal="cut",
-        mode="gentle",
-        recovery_source="whoop",
-    )
-    await upsert_user(seth)
-    log.info("Seeded user: %s", seth.id)
+    """Insert Seth and Slav if they don't exist. Run once after first deploy."""
+    for user in [
+        User(id="seth", name="Seth", dietary_modality="maintenance_active", goal="cut",  mode="gentle",    recovery_source="whoop"),
+        User(id="slav", name="Slav", dietary_modality="high_protein_performance",  goal="bulk", mode="optimizer", recovery_source="whoop"),
+    ]:
+        await upsert_user(user)
+        log.info("Seeded user: %s", user.id)

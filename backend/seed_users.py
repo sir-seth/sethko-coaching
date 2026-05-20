@@ -36,6 +36,28 @@ USERS = [
         "goal": "cut",
         "mode": "gentle",
         "recovery_source": "whoop",
+        "device": "whoop",
+    },
+    {
+        "id": "slav",
+        "name": "Slav",
+        "email": None,
+        "dietary_modality": "high_protein_performance",
+        "goal": "bulk",
+        "mode": "optimizer",
+        "recovery_source": "whoop",
+        "device": "whoop",
+    },
+    {
+        # Fixture user for Oura integration tests (T-25). Not a real user.
+        "id": "oura_test",
+        "name": "Oura Test",
+        "email": None,
+        "dietary_modality": "flexible",
+        "goal": "maintain",
+        "mode": "gentle",
+        "recovery_source": "oura",
+        "device": "oura",
     },
 ]
 
@@ -54,18 +76,20 @@ async def seed(tokens_file):
     for u in USERS:
         await conn.execute(
             """
-            INSERT INTO users (id, name, email, dietary_modality, goal, mode, recovery_source)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO users (id, name, email, dietary_modality, goal, mode, recovery_source, device)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
                 dietary_modality = EXCLUDED.dietary_modality,
                 goal             = EXCLUDED.goal,
                 mode             = EXCLUDED.mode,
-                recovery_source  = EXCLUDED.recovery_source
+                recovery_source  = EXCLUDED.recovery_source,
+                device           = EXCLUDED.device
             """,
             u["id"], u["name"], u["email"],
             u["dietary_modality"], u["goal"], u["mode"], u["recovery_source"],
+            u.get("device"),
         )
-        print(f"  Upserted user: {u['id']} (mode={u['mode']})")
+        print(f"  Upserted user: {u['id']} (mode={u['mode']}, device={u.get('device')})")
 
     if tokens_file and tokens_file.exists():
         tokens = json.loads(tokens_file.read_text())
