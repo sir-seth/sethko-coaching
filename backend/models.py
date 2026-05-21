@@ -32,7 +32,7 @@ DietaryModality = Literal[
     "flexible",
 ]
 
-Goal = Literal["cut", "recomp", "bulk", "maintain", "performance"]
+Goal = Literal["cut", "recomp", "bulk", "maintain", "performance", "just_feel_better"]
 
 RecoverySource = Literal["whoop", "oura", "both"]
 
@@ -50,6 +50,8 @@ class User(BaseModel):
     device: Optional[str] = None          # active wearable: "whoop" | "oura" | None (T-25)
     # Optional manual macro overrides. None means Claude sets targets dynamically.
     macro_targets: Optional[dict[str, Any]] = None
+    onboarding_completed_at: Optional[datetime] = None   # None = onboarding not finished (T-41)
+    habits: Optional[list[str]] = None                   # habit IDs picked in onboarding (T-41)
     created_at: Optional[datetime] = None
 
 
@@ -167,6 +169,14 @@ class BriefTodayPayload(BaseModel):
 
 class ModeUpdateRequest(BaseModel):
     mode: CoachingMode
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Flexible partial update used by onboarding and profile settings (T-41)."""
+    mode: Optional[CoachingMode] = None
+    goal: Optional[Goal] = None
+    habits: Optional[list[str]] = None
+    onboarding_completed_at: Optional[datetime] = None
 
 
 # ---------------------------------------------------------------------------

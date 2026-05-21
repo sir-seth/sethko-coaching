@@ -311,6 +311,13 @@ async def compose_brief(user_id: str, for_date: date) -> dict:
         log.debug("Could not load recent_patterns for user=%s: %s", user_id, exc)
 
     # Compute outlook (requires ≥14 scored days).
+    # TODO(revisit): two problems here —
+    #   1. Users with >14 days of device history still hit still_learning if recovery_signals
+    #      rows haven't been pulled/seeded yet. Diagnose why signals_30d is short before
+    #      assuming the user hasn't been wearing long enough.
+    #   2. The 14-day hard gate is too aggressive. Day-1 coaching should be possible using
+    #      stated goal + modality + whatever data exists (even 1 day). Reserve the full
+    #      Outlook score for the panel widget; generate coaching regardless.
     outlook = compute_outlook(sorted(signals_30d, key=lambda s: s.date))
     if outlook is None:
         plan_pick = _pick_plan(user, None)

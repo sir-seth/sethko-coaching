@@ -98,6 +98,9 @@ ALTER TABLE users ALTER COLUMN mode DROP NOT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS device TEXT DEFAULT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS oura_raw JSONB;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS sync_state JSONB;
+-- T-41: Onboarding columns.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS habits JSONB;
 
 CREATE TABLE IF NOT EXISTS whoop_tokens (
     user_id        TEXT PRIMARY KEY REFERENCES users(id),
@@ -360,6 +363,8 @@ async def get_user(user_id: str) -> Optional[User]:
         row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
     if not row:
         return None
+    habits_raw = row["habits"]
+    habits = json.loads(habits_raw) if isinstance(habits_raw, str) else habits_raw
     return User(
         id=row["id"],
         name=row["name"],
@@ -370,6 +375,8 @@ async def get_user(user_id: str) -> Optional[User]:
         recovery_source=row["recovery_source"],
         device=row["device"],
         macro_targets=row["macro_targets"],
+        onboarding_completed_at=row["onboarding_completed_at"],
+        habits=habits,
         created_at=row["created_at"],
     )
 
@@ -649,6 +656,32 @@ async def update_user_mode(user_id: str, mode: str):
             "UPDATE users SET mode = $1 WHERE id = $2",
             mode,
             user_id,
+        )
+
+
+async def update_user_profile(
+    user_id: str,
+    goal: Optional[str] = None,
+    habits: Optional[list] = None,
+    onboarding_completed_at=None,
+):
+    """Partial update for onboarding-set fields. Only touches columns that are non-None."""
+    sets, vals = [], [user_id]
+    if goal is not None:
+        vals.append(goal)
+        sets.append(f"goal = ${len(vals)}")
+    if habits is not None:
+        vals.append(json.dumps(habits))
+        sets.append(f"habits = ${len(vals)}")
+    if onboarding_completed_at is not None:
+        vals.append(onboarding_completed_at)
+        sets.append(f"onboarding_completed_at = ${len(vals)}")
+    if not sets:
+        return
+    async with _conn() as conn:
+        await conn.execute(
+            f"UPDATE users SET {', '.join(sets)} WHERE id = $1",
+            *vals,
         )
 
 

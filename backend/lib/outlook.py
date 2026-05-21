@@ -56,6 +56,10 @@ def compute_outlook(signals: list[RecoverySignal]) -> Optional[Outlook]:
     signals: RecoverySignal list sorted ascending by date.
     The last entry is treated as today; all prior entries form the baseline.
     Returns None if fewer than 14 records exist (first-14-days rule from the brief).
+
+    # TODO(revisit): 14-day gate blocks coaching entirely. Consider lowering to ~3 days
+    # and degrading gracefully (skip z-score normalisation, return a raw value with a
+    # wider confidence band) so users get day-1 coaching from goals alone.
     """
     if len(signals) < 14:
         return None
