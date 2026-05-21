@@ -12,3 +12,4 @@ pytest-asyncio>=0.23
 PyJWT>=2.9
 cryptography>=43
 httpx[http2]>=0.27
+pyyaml>=6.0

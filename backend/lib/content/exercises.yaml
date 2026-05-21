@@ -1,0 +1,102 @@
+# T-42 — Curated exercise form video allowlist.
+# Human-curated: every entry MUST be verified before merging.
+# Verify each at: https://youtu.be/<youtube_id>
+# Rules: public video (not a Short, not a livestream), < 90 s, no vocals, form-only demo.
+#
+# Keys are canonical snake_case names matching lift_pool.py display names.
+# IMPORTANT: youtube_id values marked PLACEHOLDER need real IDs before shipping.
+
+bent_over_row:
+  youtube_id: "PLACEHOLDER"
+  caption: "Bent-over row — neutral spine, drive elbows back"
+  duration_s: 45
+
+lat_pulldown:
+  youtube_id: "PLACEHOLDER"
+  caption: "Lat pulldown — full stretch at top, elbows to ribs"
+  duration_s: 40
+
+seated_cable_row:
+  youtube_id: "PLACEHOLDER"
+  caption: "Seated cable row — chest up, neutral spine, slow return"
+  duration_s: 40
+
+pull_up:
+  youtube_id: "PLACEHOLDER"
+  caption: "Pull-up — full hang to chin over bar, controlled descent"
+  duration_s: 35
+
+bench_press:
+  youtube_id: "PLACEHOLDER"
+  caption: "Bench press — arch, leg drive, bar to chest"
+  duration_s: 50
+
+incline_bench_press:
+  youtube_id: "PLACEHOLDER"
+  caption: "Incline bench press — 30° incline, elbows tucked"
+  duration_s: 45
+
+cable_fly:
+  youtube_id: "PLACEHOLDER"
+  caption: "Cable fly — slight bend in elbows, squeeze at center"
+  duration_s: 35
+
+chest_dip:
+  youtube_id: "PLACEHOLDER"
+  caption: "Chest dip — forward lean, elbows flared, deep stretch"
+  duration_s: 35
+
+bicep_curl:
+  youtube_id: "PLACEHOLDER"
+  caption: "Bicep curl — elbows pinned, no swing"
+  duration_s: 35
+
+tricep_pushdown:
+  youtube_id: "PLACEHOLDER"
+  caption: "Tricep pushdown — elbows tucked, full extension"
+  duration_s: 35
+
+hammer_curl:
+  youtube_id: "PLACEHOLDER"
+  caption: "Hammer curl — neutral grip, slow eccentric"
+  duration_s: 35
+
+cable_curl_tricep_press:
+  youtube_id: "PLACEHOLDER"
+  caption: "Cable curl + tricep press — strict form, no swing"
+  duration_s: 40
+
+squat:
+  youtube_id: "PLACEHOLDER"
+  caption: "Squat — bar on traps, break at hips and knees together"
+  duration_s: 55
+
+romanian_deadlift:
+  youtube_id: "PLACEHOLDER"
+  caption: "Romanian deadlift — soft knees, hinge at hips, bar close to legs"
+  duration_s: 45
+
+leg_press:
+  youtube_id: "PLACEHOLDER"
+  caption: "Leg press — full range, don't lock out knees"
+  duration_s: 40
+
+walking_lunge:
+  youtube_id: "PLACEHOLDER"
+  caption: "Walking lunge — upright torso, front knee tracks toes"
+  duration_s: 35
+
+overhead_press:
+  youtube_id: "PLACEHOLDER"
+  caption: "Overhead press — lock out elbows, bar clears nose on the way up"
+  duration_s: 50
+
+lateral_raise:
+  youtube_id: "PLACEHOLDER"
+  caption: "Lateral raise — slight bend, lead with elbows, 45° forward tilt"
+  duration_s: 35
+
+face_pull:
+  youtube_id: "PLACEHOLDER"
+  caption: "Face pull — rope to face, elbows flared, external rotation"
+  duration_s: 40

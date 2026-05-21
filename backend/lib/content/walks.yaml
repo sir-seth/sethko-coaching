@@ -1,0 +1,4 @@
+# T-42 — Saved walk destinations per user.
+# Seeded empty. Populated via iOS-side destination picker (deferred follow-up).
+# Schema: { user_id, label, lat, lon, path_polyline?, distance_mi, duration_min }
+[]

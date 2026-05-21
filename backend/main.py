@@ -96,6 +96,7 @@ from routes.workouts import router as workouts_router
 from routes.patterns import router as patterns_router
 from routes.mood_wins import router as mood_wins_router
 from routes.push import router as push_router
+from routes.content import router as content_router
 
 app.include_router(auth_router)
 app.include_router(users_router)
@@ -113,6 +114,7 @@ app.include_router(workouts_router)
 app.include_router(patterns_router)
 app.include_router(mood_wins_router)
 app.include_router(push_router)
+app.include_router(content_router)
 
 
 # ---------------------------------------------------------------------------

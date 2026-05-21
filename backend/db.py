@@ -193,6 +193,8 @@ ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS mood_label TEXT;
 ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS mood_numeric SMALLINT;
 ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS motivation SMALLINT;
 ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS clarity SMALLINT;
+-- T-43: watch check-ins tagged so we can analyze differences later.
+ALTER TABLE subjective_log ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'phone';
 
 -- Food log entries (T-21).
 CREATE TABLE IF NOT EXISTS nutrition_log (
@@ -363,21 +365,22 @@ async def get_user(user_id: str) -> Optional[User]:
         row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
     if not row:
         return None
-    habits_raw = row["habits"]
+    row_dict = dict(row)
+    habits_raw = row_dict.get("habits")
     habits = json.loads(habits_raw) if isinstance(habits_raw, str) else habits_raw
     return User(
-        id=row["id"],
-        name=row["name"],
-        email=row["email"],
-        dietary_modality=row["dietary_modality"],
-        goal=row["goal"],
-        mode=row["mode"],
-        recovery_source=row["recovery_source"],
-        device=row["device"],
-        macro_targets=row["macro_targets"],
-        onboarding_completed_at=row["onboarding_completed_at"],
+        id=row_dict["id"],
+        name=row_dict["name"],
+        email=row_dict.get("email"),
+        dietary_modality=row_dict["dietary_modality"],
+        goal=row_dict["goal"],
+        mode=row_dict.get("mode"),
+        recovery_source=row_dict.get("recovery_source", "whoop"),
+        device=row_dict.get("device"),
+        macro_targets=row_dict.get("macro_targets"),
+        onboarding_completed_at=row_dict.get("onboarding_completed_at"),
         habits=habits,
-        created_at=row["created_at"],
+        created_at=row_dict.get("created_at"),
     )
 
 
@@ -914,12 +917,13 @@ async def commit_plan(user_id: str, for_date: date, category: str, name: str) ->
 
 async def upsert_subjective_log(user_id: str, payload: CheckInRequest):
     mood_numeric = MOOD_NUMERIC[payload.mood]
+    source = payload.source or "phone"
     async with _conn() as conn:
         await conn.execute(
             """
             INSERT INTO subjective_log
-                (user_id, date, mood_label, mood_numeric, energy, motivation, clarity, note)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (user_id, date, mood_label, mood_numeric, energy, motivation, clarity, note, source)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (user_id, date) DO UPDATE SET
                 mood_label   = EXCLUDED.mood_label,
                 mood_numeric = EXCLUDED.mood_numeric,
@@ -927,6 +931,7 @@ async def upsert_subjective_log(user_id: str, payload: CheckInRequest):
                 motivation   = EXCLUDED.motivation,
                 clarity      = EXCLUDED.clarity,
                 note         = EXCLUDED.note,
+                source       = EXCLUDED.source,
                 created_at   = NOW()
             """,
             user_id,
@@ -937,6 +942,7 @@ async def upsert_subjective_log(user_id: str, payload: CheckInRequest):
             payload.motivation,
             payload.clarity,
             payload.note,
+            source,
         )
 
 

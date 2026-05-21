@@ -1,0 +1,34 @@
+# T-42 — Curated ambient audio track allowlist.
+# Tracks are bundled .m4a assets in SethkoCoaching/Resources/Audio/.
+# asset_path: path without extension relative to bundle Resources.
+# credit: displayed verbatim in the iOS attribution sheet — required.
+# No vocals. Total bundle size target: ≤ 10 MB across all tracks.
+# Source assets: freesound.org CC0 1.0 (no attribution required, but credited here).
+
+- slug: rain_leaves
+  title: Rain on leaves
+  duration_s: 600
+  asset_path: Audio/rain_leaves
+  credit: "freesound.org · CC0 1.0"
+  contexts: [meditate, lift]
+
+- slug: mountain_stream
+  title: Mountain stream
+  duration_s: 600
+  asset_path: Audio/mountain_stream
+  credit: "freesound.org · CC0 1.0"
+  contexts: [meditate]
+
+- slug: ocean_waves
+  title: Ocean waves
+  duration_s: 600
+  asset_path: Audio/ocean_waves
+  credit: "freesound.org · CC0 1.0"
+  contexts: [meditate, lift]
+
+- slug: forest_morning
+  title: Forest morning
+  duration_s: 600
+  asset_path: Audio/forest_morning
+  credit: "freesound.org · CC0 1.0"
+  contexts: [meditate]

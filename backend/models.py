@@ -193,6 +193,7 @@ class CheckInRequest(BaseModel):
     motivation: int   # 1-10
     clarity: int   # 1-10
     note: Optional[str] = None
+    source: Optional[str] = None   # "watch" | "phone" (None → defaults to "phone" in db)
 
 
 class SubjectiveLog(BaseModel):
